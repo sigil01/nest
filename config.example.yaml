@@ -25,9 +25,18 @@ security:
 #     gracePeriodMs: 5000               # skip jobs if user message within last N ms (default: 5000)
 
 # server:
+#     # Security headers always applied to every response:
+#     #   Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src blob: data:
+#     #   X-Frame-Options: DENY
+#     #   X-Content-Type-Options: nosniff
+#     #   Referrer-Policy: strict-origin-when-cross-origin
+#     #   Permissions-Policy: camera=(), microphone=(), geolocation=()
+#     # Note: HSTS should be set by your reverse proxy (Caddy/nginx), not here.
 #     port: 8484
 #     token: "env:SERVER_TOKEN"         # Required — Bearer token for API auth
 #     publicDir: /app/public            # Optional — defaults to ./public
+#     host: "127.0.0.1"                 # Bind address — use "0.0.0.0" for Docker
+#     trustProxy: false                 # Set true behind a reverse proxy (nginx, Caddy)
 
 # files:
 #     roots:
@@ -35,6 +44,7 @@ security:
 #         sketches: /path/to/sketches  # Add as many as you like
 #         cron: /path/to/cron.d
 
-# Legacy (still works — equivalent to files.roots.vault):
-# vault:
-#     path: /path/to/vault
+# extensions:
+#     dir: /path/to/extensions     # Directory containing extension subdirectories
+                                    # Each subdirectory needs a manifest.yaml with slots config
+                                    # Extensions run in sandboxed iframes (see docs/extensions.md)

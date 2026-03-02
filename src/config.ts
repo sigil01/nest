@@ -52,6 +52,17 @@ function validate(config: unknown): asserts config is Config {
                 "with wildcard origins. Use an explicit origin like 'https://example.com'."
             );
         }
+        if (c.server.trustProxy !== undefined && typeof c.server.trustProxy !== "boolean") {
+            throw new Error("config: server.trustProxy must be a boolean");
+        }
+        if (c.server.host !== undefined) {
+            if (typeof c.server.host !== "string") {
+                throw new Error("config: server.host must be a string");
+            }
+            if (!/^(\d{1,3}\.){3}\d{1,3}$|^[a-zA-Z0-9.-]+$|^\[:[:0-9a-fA-F]+\]$/.test(c.server.host)) {
+                throw new Error("config: server.host must be a valid IP address or hostname");
+            }
+        }
     }
     if (c.files) {
         if (!c.files.roots || typeof c.files.roots !== "object" || Array.isArray(c.files.roots)) {
@@ -61,6 +72,12 @@ function validate(config: unknown): asserts config is Config {
             if (typeof path !== "string" || !path) {
                 throw new Error(`config: files.roots.${name} must be a non-empty string`);
             }
+        }
+    }
+
+    if (c.extensions) {
+        if (!c.extensions.dir || typeof c.extensions.dir !== "string") {
+            throw new Error("config: extensions.dir is required and must be a string");
         }
     }
 

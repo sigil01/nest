@@ -29,7 +29,6 @@ export default function FileBrowser({ selectedFile, onFileSelect, onFileCreated,
     const [createMenu, setCreateMenu] = useState<{ x: number; y: number } | null>(null);
     const contextMenuRef = useRef<HTMLDivElement>(null);
     const createMenuRef = useRef<HTMLDivElement>(null);
-
     // Load available roots on mount
     useEffect(() => {
         fetchRoots()

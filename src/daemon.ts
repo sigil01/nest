@@ -290,6 +290,12 @@ export class Daemon implements DaemonRef, DashboardProvider {
                 this.httpServer.setFiles(workspaceFiles);
                 logger.info("File roots configured", { roots: Object.keys(roots) });
             }
+
+            // Wire extensions if configured
+            if (this.config.extensions?.dir) {
+                this.httpServer.setExtensions(this.config.extensions);
+                logger.info("Extensions configured", { dir: this.config.extensions.dir });
+            }
         }
 
         logger.info("nest started", {

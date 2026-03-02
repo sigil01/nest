@@ -4,6 +4,7 @@ import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { HttpServer } from "../src/server.js";
 import type { ServerConfig } from "../src/types.js";
+import { ConfigWatcher } from "../src/config-watcher.js";
 
 const TEST_TOKEN = "test-secret-token";
 const TEST_PORT = 0; // Let OS assign a free port
@@ -44,6 +45,40 @@ function fetch(
             },
         );
         req.on("error", reject);
+        req.end();
+    });
+}
+
+/** Helper: make an HTTP request with a body */
+function fetchWithBody(
+    url: string,
+    body: string,
+    options: { method?: string; headers?: Record<string, string> } = {},
+): Promise<{ status: number; body: string; headers: Record<string, string> }> {
+    return new Promise((resolve, reject) => {
+        const parsed = new URL(url);
+        const req = request(
+            {
+                hostname: parsed.hostname,
+                port: parsed.port,
+                path: parsed.pathname + parsed.search,
+                method: options.method ?? "POST",
+                headers: options.headers ?? {},
+            },
+            (res) => {
+                let data = "";
+                res.on("data", (chunk) => (data += chunk));
+                res.on("end", () =>
+                    resolve({
+                        status: res.statusCode!,
+                        body: data,
+                        headers: res.headers as Record<string, string>,
+                    }),
+                );
+            },
+        );
+        req.on("error", reject);
+        req.write(body);
         req.end();
     });
 }
@@ -325,5 +360,285 @@ describe("WebSocket upgrade at /attach", () => {
             req.end();
         });
         expect(res.statusCode).toBe(404);
+    });
+});
+
+// ─── Security Hardening (Phase 1) ────────────────────────────
+
+describe("Security hardening (Phase 1)", () => {
+    let server: HttpServer;
+    const tmpPublic = join(import.meta.dirname!, "__test_security_public__");
+
+    beforeEach(async () => {
+        mkdirSync(tmpPublic, { recursive: true });
+        writeFileSync(join(tmpPublic, "index.html"), "<h1>Security Test</h1>");
+        server = new HttpServer(makeConfig({ publicDir: tmpPublic }));
+        await server.start();
+    });
+
+    afterEach(async () => {
+        await server.stop();
+        rmSync(tmpPublic, { recursive: true, force: true });
+    });
+
+    const EXPECTED_HEADERS = {
+        "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src blob: data:",
+        "x-frame-options": "DENY",
+        "x-content-type-options": "nosniff",
+        "referrer-policy": "strict-origin-when-cross-origin",
+        "permissions-policy": "camera=(), microphone=(), geolocation=()",
+    };
+
+    it("security headers present on API response", async () => {
+        const res = await fetch(`${baseUrl(server)}/api/ping`, {
+            headers: authHeader(),
+        });
+        expect(res.status).toBe(200);
+        for (const [header, value] of Object.entries(EXPECTED_HEADERS)) {
+            expect(res.headers[header]).toBe(value);
+        }
+    });
+
+    it("security headers present on static file response", async () => {
+        const res = await fetch(`${baseUrl(server)}/`);
+        expect(res.status).toBe(200);
+        for (const [header, value] of Object.entries(EXPECTED_HEADERS)) {
+            expect(res.headers[header]).toBe(value);
+        }
+    });
+
+    it("body size limit: request under limit succeeds", async () => {
+        // Set up a webhook handler so POST /api/webhook accepts bodies
+        server.setWebhookHandler(async (msg) => ({ ok: true, queued: false }));
+        const smallBody = JSON.stringify({ message: "hello", source: "test" });
+        const res = await fetchWithBody(
+            `${baseUrl(server)}/api/webhook`,
+            smallBody,
+            {
+                headers: {
+                    ...authHeader(),
+                    "Content-Type": "application/json",
+                },
+            },
+        );
+        expect(res.status).toBeLessThan(413);
+    });
+
+    it("body size limit: request over limit returns 413", async () => {
+        server.setWebhookHandler(async (msg) => ({ ok: true, queued: false }));
+        // Create a body larger than 1MB
+        const largeBody = "x".repeat(1_048_577 + 100);
+        const res = await fetchWithBody(
+            `${baseUrl(server)}/api/webhook`,
+            largeBody,
+            {
+                headers: {
+                    ...authHeader(),
+                    "Content-Type": "application/json",
+                },
+            },
+        );
+        expect(res.status).toBe(413);
+    });
+
+    it("content-type validation: wrong type returns 415", async () => {
+        server.setWebhookHandler(async (msg) => ({ ok: true, queued: false }));
+        const res = await fetchWithBody(
+            `${baseUrl(server)}/api/webhook`,
+            "hello",
+            {
+                headers: {
+                    ...authHeader(),
+                    "Content-Type": "text/plain",
+                },
+            },
+        );
+        expect(res.status).toBe(415);
+    });
+
+    it("content-type validation: missing type accepted", async () => {
+        server.setWebhookHandler(async (msg) => ({ ok: true, queued: false }));
+        const body = JSON.stringify({ message: "hello", source: "test" });
+        const res = await fetchWithBody(
+            `${baseUrl(server)}/api/webhook`,
+            body,
+            {
+                headers: authHeader(),
+            },
+        );
+        // Should not be 415 — missing Content-Type is accepted
+        expect(res.status).not.toBe(415);
+    });
+
+    it("timing-safe auth: valid token succeeds", async () => {
+        const res = await fetch(`${baseUrl(server)}/api/ping`, {
+            headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+        });
+        expect(res.status).toBe(200);
+    });
+
+    it("timing-safe auth: wrong token fails", async () => {
+        const res = await fetch(`${baseUrl(server)}/api/ping`, {
+            headers: { Authorization: "Bearer wrong-token-value" },
+        });
+        expect(res.status).toBe(401);
+    });
+
+    it("timing-safe auth: wrong length token fails", async () => {
+        const res = await fetch(`${baseUrl(server)}/api/ping`, {
+            headers: { Authorization: "Bearer x" },
+        });
+        expect(res.status).toBe(401);
+    });
+});
+
+// ─── Auth & Hardening (Phase 2) ──────────────────────────────
+
+describe("Auth & Hardening (Phase 2)", () => {
+    let server: HttpServer;
+
+    beforeEach(async () => {
+        server = new HttpServer(makeConfig());
+        await server.start();
+    });
+
+    afterEach(async () => {
+        await server.stop();
+    });
+
+    /** Helper: login and return the session cookie string */
+    async function login(url: string, token: string = TEST_TOKEN): Promise<{ status: number; cookie: string }> {
+        const res = await fetchWithBody(
+            `${url}/api/auth/login`,
+            JSON.stringify({ token }),
+            { headers: { "Content-Type": "application/json" } },
+        );
+        // set-cookie may be an array in node:http despite Record<string,string> cast
+        const raw = res.headers["set-cookie"] as unknown;
+        const setCookie = Array.isArray(raw) ? raw[0] ?? "" : String(raw ?? "");
+        return { status: res.status, cookie: setCookie };
+    }
+
+    it("login with valid token returns 200 + sets cookie", async () => {
+        const url = baseUrl(server);
+        const res = await login(url);
+        expect(res.status).toBe(200);
+        expect(res.cookie).toMatch(/nest-session=[a-f0-9]{64}/);
+        expect(res.cookie).toContain("HttpOnly");
+        expect(res.cookie).toContain("SameSite=Strict");
+    });
+
+    it("login with invalid token returns 401", async () => {
+        const url = baseUrl(server);
+        const res = await login(url, "wrong-token");
+        expect(res.status).toBe(401);
+        expect(res.cookie).toBe("");
+    });
+
+    it("cookie auth works on API routes", async () => {
+        const url = baseUrl(server);
+        const { cookie } = await login(url);
+        // Extract just the cookie name=value pair
+        const cookieValue = cookie.split(";")[0];
+
+        const res = await fetch(`${url}/api/ping`, {
+            headers: { Cookie: cookieValue },
+        });
+        expect(res.status).toBe(200);
+        expect(JSON.parse(res.body)).toEqual({ pong: true });
+    });
+
+    it("bearer auth still works", async () => {
+        const url = baseUrl(server);
+        const res = await fetch(`${url}/api/ping`, {
+            headers: authHeader(),
+        });
+        expect(res.status).toBe(200);
+        expect(JSON.parse(res.body)).toEqual({ pong: true });
+    });
+
+    it("logout clears session", async () => {
+        const url = baseUrl(server);
+        const { cookie } = await login(url);
+        const cookieValue = cookie.split(";")[0];
+
+        // Logout using the session cookie
+        const logoutRes = await fetchWithBody(
+            `${url}/api/auth/logout`,
+            "{}",
+            { headers: { Cookie: cookieValue, "Content-Type": "application/json" } },
+        );
+        expect(logoutRes.status).toBe(200);
+
+        // Cookie should no longer work
+        const res = await fetch(`${url}/api/ping`, {
+            headers: { Cookie: cookieValue },
+        });
+        expect(res.status).toBe(401);
+    });
+
+    it("config allowlist blocks immutable sections", async () => {
+        const url = baseUrl(server);
+        const tmpConfig = join(import.meta.dirname!, "__test_config__.yaml");
+        const minimalConfig = [
+            "pi:",
+            "  cwd: /tmp",
+            "security:",
+            "  allowed_users:",
+            "    - test",
+            `server:`,
+            `  port: 1`,
+            `  token: ${TEST_TOKEN}`,
+        ].join("\n");
+        writeFileSync(tmpConfig, minimalConfig);
+
+        try {
+            const { loadConfig } = await import("../src/config.js");
+            const cfg = loadConfig(tmpConfig);
+            const watcher = new ConfigWatcher(tmpConfig, cfg);
+            server.setConfigWatcher(watcher, tmpConfig);
+
+            const res = await fetchWithBody(
+                `${url}/api/config`,
+                JSON.stringify({ server: { port: 9999 } }),
+                { headers: { ...authHeader(), "Content-Type": "application/json" } },
+            );
+            expect(res.status).toBe(403);
+            expect(JSON.parse(res.body).error).toContain("Cannot modify server");
+        } finally {
+            rmSync(tmpConfig, { force: true });
+        }
+    });
+
+    it("config allowlist allows mutable sections", async () => {
+        const url = baseUrl(server);
+        const tmpConfig = join(import.meta.dirname!, "__test_config_mut__.yaml");
+        const minimalConfig = [
+            "pi:",
+            "  cwd: /tmp",
+            "security:",
+            "  allowed_users:",
+            "    - test",
+            `server:`,
+            `  port: 1`,
+            `  token: ${TEST_TOKEN}`,
+        ].join("\n");
+        writeFileSync(tmpConfig, minimalConfig);
+
+        try {
+            const { loadConfig } = await import("../src/config.js");
+            const cfg = loadConfig(tmpConfig);
+            const watcher = new ConfigWatcher(tmpConfig, cfg);
+            server.setConfigWatcher(watcher, tmpConfig);
+
+            const res = await fetchWithBody(
+                `${url}/api/config`,
+                JSON.stringify({ cron: {} }),
+                { headers: { ...authHeader(), "Content-Type": "application/json" } },
+            );
+            expect(res.status).not.toBe(403);
+        } finally {
+            rmSync(tmpConfig, { force: true });
+        }
     });
 });

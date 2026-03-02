@@ -58,6 +58,8 @@ export interface ServerConfig {
     token: string;
     publicDir?: string;
     cors?: CorsConfig;
+    trustProxy?: boolean;
+    host?: string;
 }
 
 // ─── Session & Routing Types ──────────────────────────────────
@@ -100,6 +102,28 @@ export interface FileEntry {
     children?: FileEntry[];
 }
 
+// ─── Extensions Types ─────────────────────────────────────────
+
+export interface ExtensionsConfig {
+    dir: string;
+}
+
+export interface ExtensionSlotConfig {
+    type: 'dashboard' | 'sidebar' | 'toolbar' | 'viewer';
+    entry: string;
+    defaultHeight?: number;
+}
+
+export interface ExtensionManifest {
+    id: string;
+    name: string;
+    version: number;
+    slots: ExtensionSlotConfig[];
+    // Backward compat with old manifests (entry + optional styles, no slots)
+    entry?: string;
+    styles?: string;
+}
+
 // ─── Main Config ──────────────────────────────────────────────
 
 export interface Config {
@@ -125,6 +149,7 @@ export interface Config {
     server?: ServerConfig;
     tracking?: TrackingConfig;
     files?: FilesConfig;
+    extensions?: ExtensionsConfig;
     sessions?: Record<string, SessionConfig>;
     defaultSession?: string;
     routing?: RoutingConfig;
@@ -225,6 +250,6 @@ export type ConfigRedacted = {
         : K extends "matrix"
           ? { homeserver: string; user: string; token: string; storage_path?: string } | undefined
           : K extends "server"
-            ? { port: number; token: string; publicDir?: string; cors?: CorsConfig } | undefined
+            ? { port: number; token: string; publicDir?: string; cors?: CorsConfig; trustProxy?: boolean; host?: string } | undefined
             : Config[K];
 };

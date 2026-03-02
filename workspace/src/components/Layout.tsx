@@ -1,11 +1,24 @@
-import { useState, useEffect, useCallback, useRef, lazy, Suspense } from "react";
+import { useState, useEffect, useCallback, useRef, useReducer, lazy, Suspense } from "react";
 import FileBrowser from "./FileBrowser";
 import Dashboard from "./Dashboard";
 import FileViewer from "./FileViewer";
 import Chat from "./Chat";
 import { fetchFile } from "../api";
+import { useExtensionRegistry, ExtensionFrame } from "../extensions";
+import type { ExtensionRegistry } from "../extensions";
 
 const Canvas = lazy(() => import("./Canvas"));
+
+/** Re-render when registry emits 'change' */
+function useRegistryChange(registry: ExtensionRegistry | null): void {
+    const [, forceUpdate] = useReducer((x: number) => x + 1, 0);
+    useEffect(() => {
+        if (!registry) return;
+        const handler = () => forceUpdate();
+        registry.addEventListener('change', handler);
+        return () => registry.removeEventListener('change', handler);
+    }, [registry]);
+}
 
 export default function Layout() {
     const [selectedFile, setSelectedFile] = useState<string | null>(null);
@@ -26,6 +39,13 @@ export default function Layout() {
 
     // Track dirty state from FileViewer / Canvas
     const dirtyRef = useRef(false);
+
+    // Extension registry
+    const registry = useExtensionRegistry();
+    useRegistryChange(registry);
+
+    const toolbarSlots = registry?.getSlots('toolbar') ?? [];
+    const sidebarSlots = registry?.getSlots('sidebar') ?? [];
 
     useEffect(() => {
         const mediaQuery = window.matchMedia("(max-width: 768px)");
@@ -108,6 +128,13 @@ export default function Layout() {
         }
     }, [selectedFile]);
 
+    const handleHomeClick = useCallback(() => {
+        if (confirmIfDirty()) {
+            dirtyRef.current = false;
+            setSelectedFile(null);
+        }
+    }, [confirmIfDirty]);
+
     const toggleSidebar = () => {
         if (isMobile) {
             setMobileOverlay(mobileOverlay === "sidebar" ? null : "sidebar");
@@ -124,6 +151,62 @@ export default function Layout() {
         }
     };
 
+    // Determine content to render
+    const renderContent = () => {
+        // Excalidraw canvas
+        if (isExcalidraw && selectedFile) {
+            if (canvasLoading) {
+                return (
+                    <div className="content-inner">
+                        <div className="empty-state">Loading drawing…</div>
+                    </div>
+                );
+            }
+            if (canvasError) {
+                return (
+                    <div className="content-inner">
+                        <div className="empty-state">Error: {canvasError}</div>
+                    </div>
+                );
+            }
+            if (canvasData !== null) {
+                return (
+                    <Suspense fallback={
+                        <div className="content-inner">
+                            <div className="empty-state">Loading canvas…</div>
+                        </div>
+                    }>
+                        <Canvas
+                            key={selectedFile}
+                            initialData={canvasData}
+                            filePath={selectedFile}
+                            fileRoot={activeRoot}
+                            onDirtyChange={handleDirtyChange}
+                        />
+                    </Suspense>
+                );
+            }
+            return null;
+        }
+
+        // Normal content: file viewer or dashboard
+        return (
+            <div className="content-inner">
+                {selectedFile ? (
+                    <FileViewer
+                        path={selectedFile}
+                        root={activeRoot}
+                        onBack={handleBack}
+                        onWikiLink={handleWikiLink}
+                        onDirtyChange={handleDirtyChange}
+                    />
+                ) : (
+                    <Dashboard />
+                )}
+            </div>
+        );
+    };
+
     return (
         <div className="workspace">
             <div className="top-bar">
@@ -137,11 +220,20 @@ export default function Layout() {
                     </button>
                     <h1
                         className="home-link"
-                        onClick={() => { if (confirmIfDirty()) { dirtyRef.current = false; setSelectedFile(null); } }}
+                        onClick={handleHomeClick}
                         title="Back to dashboard"
                     ><span>nest</span></h1>
                 </div>
                 <div className="top-bar-right">
+                    {toolbarSlots.map(({ extensionId, slot }) => (
+                        <div key={`${extensionId}-${slot.entry}`} className="ext-toolbar-btn">
+                            <ExtensionFrame
+                                extensionId={extensionId}
+                                entry={slot.entry}
+                                defaultHeight={slot.defaultHeight ?? 32}
+                            />
+                        </div>
+                    ))}
                     <button
                         className={`toggle-btn ${chatOpen || mobileOverlay === "chat" ? "active" : ""}`}
                         onClick={toggleChat}
@@ -162,50 +254,25 @@ export default function Layout() {
                             onFileCreated={handleFileCreated}
                             onFileDeleted={handleFileDeleted}
                         />
+                        {sidebarSlots.length > 0 && (
+                            <div className="ext-sidebar-sections">
+                                {sidebarSlots.map(({ extensionId, slot }) => (
+                                    <div key={`${extensionId}-${slot.entry}`} className="ext-sidebar-section">
+                                        <ExtensionFrame
+                                            extensionId={extensionId}
+                                            entry={slot.entry}
+                                            defaultHeight={slot.defaultHeight ?? 200}
+                                        />
+                                    </div>
+                                ))}
+                            </div>
+                        )}
                     </div>
                 )}
 
                 {/* Main content */}
-                <div className={`content ${isExcalidraw ? "content-canvas" : ""}`}>
-                    {isExcalidraw && selectedFile ? (
-                        canvasLoading ? (
-                            <div className="content-inner">
-                                <div className="empty-state">Loading drawing…</div>
-                            </div>
-                        ) : canvasError ? (
-                            <div className="content-inner">
-                                <div className="empty-state">Error: {canvasError}</div>
-                            </div>
-                        ) : canvasData !== null ? (
-                            <Suspense fallback={
-                                <div className="content-inner">
-                                    <div className="empty-state">Loading canvas…</div>
-                                </div>
-                            }>
-                                <Canvas
-                                    key={selectedFile}
-                                    initialData={canvasData}
-                                    filePath={selectedFile}
-                                    fileRoot={activeRoot}
-                                    onDirtyChange={handleDirtyChange}
-                                />
-                            </Suspense>
-                        ) : null
-                    ) : (
-                        <div className="content-inner">
-                            {selectedFile ? (
-                                <FileViewer
-                                    path={selectedFile}
-                                    root={activeRoot}
-                                    onBack={handleBack}
-                                    onWikiLink={handleWikiLink}
-                                    onDirtyChange={handleDirtyChange}
-                                />
-                            ) : (
-                                <Dashboard />
-                            )}
-                        </div>
-                    )}
+                <div className={`content ${isExcalidraw && selectedFile ? "content-canvas" : ""}`}>
+                    {renderContent()}
                 </div>
 
                 {/* Chat */}

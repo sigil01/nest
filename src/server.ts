@@ -1,10 +1,11 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
-import { createReadStream, existsSync, statSync } from "node:fs";
-import { join, extname, resolve } from "node:path";
-import { createHash } from "node:crypto";
+import { createReadStream, existsSync, statSync, readdirSync, readFileSync } from "node:fs";
+import { join, extname, resolve, normalize } from "node:path";
+import { createHash, timingSafeEqual, randomBytes } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import { writeFileSync } from "node:fs";
-import type { ServerConfig, WebhookHandler, ActivityEntry } from "./types.js";
+import yaml from "js-yaml";
+import type { ServerConfig, WebhookHandler, ActivityEntry, ExtensionsConfig, ExtensionManifest } from "./types.js";
 import type { ConfigWatcher } from "./config-watcher.js";
 import type { WorkspaceFiles } from "./vault/files.js";
 import { FilePathError, FileNotFoundError } from "./vault/files.js";
@@ -44,11 +45,17 @@ const MIME_TYPES: Record<string, string> = {
     ".html": "text/html",
     ".css": "text/css",
     ".js": "application/javascript",
+    ".mjs": "application/javascript",
     ".json": "application/json",
+    ".yaml": "text/yaml",
+    ".yml": "text/yaml",
     ".png": "image/png",
     ".jpg": "image/jpeg",
+    ".gif": "image/gif",
     ".svg": "image/svg+xml",
     ".ico": "image/x-icon",
+    ".woff2": "font/woff2",
+    ".woff": "font/woff",
 };
 
 const WEBHOOK_RATE_WINDOW_MS = 60_000;
@@ -56,8 +63,15 @@ const WEBHOOK_RATE_MAX = 10;
 const WEBHOOK_GLOBAL_RATE_MAX = 30;
 const WEBHOOK_GLOBAL_BUCKET = "__global__";
 
-const AUTH_RATE_WINDOW_MS = 60_000;
-const AUTH_RATE_MAX = 10;
+const AUTH_RATE_WINDOW_MS = 300_000;
+const AUTH_RATE_MAX = 5;
+
+const MAX_BODY_SIZE = 1_048_576; // 1MB
+
+const WS_RATE_WINDOW_MS = 60_000;
+const WS_RATE_MAX = 120;
+
+const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 type RouteHandler = (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
 export type WsRpcHandler = (message: { type: string; [key: string]: unknown }, clientId: string) => Promise<any>;
@@ -77,9 +91,12 @@ export class HttpServer {
     private wss: WebSocketServer;
     private wsClients = new Map<string, WebSocket>();
     private wsClientCounter = 0;
+    private wsRateLimits = new Map<string, number[]>();
     private wsHandler?: WsRpcHandler;
     private workspaceFiles?: WorkspaceFiles;
+    private extensionsConfig?: ExtensionsConfig;
     private prefixRoutes: Array<{ prefix: string; method: string; handler: RouteHandler }> = [];
+    private sessions = new Map<string, { createdAt: number }>();
 
     constructor(config: ServerConfig, dashboard?: DashboardProvider) {
         this.config = config;
@@ -131,11 +148,12 @@ export class HttpServer {
     }
 
     async start(): Promise<void> {
+        const host = this.config.host ?? "127.0.0.1";
         return new Promise((resolve, reject) => {
             this.server.once("error", reject);
-            this.server.listen(this.config.port, "0.0.0.0", () => {
+            this.server.listen(this.config.port, host, () => {
                 this.server.removeListener("error", reject);
-                logger.info("HTTP server listening", { port: this.config.port });
+                logger.info("HTTP server listening", { port: this.config.port, host });
                 resolve();
             });
         });
@@ -175,7 +193,122 @@ export class HttpServer {
         this.registerFileRoutes();
     }
 
+    setExtensions(config: ExtensionsConfig): void {
+        this.extensionsConfig = config;
+        this.registerExtensionRoutes();
+    }
 
+    private registerExtensionRoutes(): void {
+        const extDir = this.extensionsConfig!.dir;
+
+        // GET /api/extensions — list all extensions
+        this.route("GET", "/api/extensions", async (_req, res) => {
+            const dir = resolve(extDir);
+            if (!existsSync(dir) || !statSync(dir).isDirectory()) {
+                this.json(res, 200, { extensions: [] });
+                return;
+            }
+
+            const extensions: ExtensionManifest[] = [];
+            try {
+                const entries = readdirSync(dir, { withFileTypes: true });
+                for (const entry of entries) {
+                    if (!entry.isDirectory()) continue;
+                    const manifestPath = join(dir, entry.name, "manifest.yaml");
+                    if (!existsSync(manifestPath)) continue;
+                    try {
+                        const raw = readFileSync(manifestPath, "utf-8");
+                        const manifest = yaml.load(raw) as Record<string, any>;
+                        if (!manifest || !manifest.id || !manifest.name) continue;
+
+                        // Build slots array: new format has `slots`, old format has `entry`
+                        let slots: ExtensionManifest['slots'];
+                        if (Array.isArray(manifest.slots)) {
+                            slots = manifest.slots;
+                        } else if (manifest.entry) {
+                            // Auto-convert old single-entry manifest to slots format
+                            slots = [{ type: 'dashboard', entry: manifest.entry }];
+                        } else {
+                            continue; // No slots and no entry — skip
+                        }
+
+                        extensions.push({
+                            id: manifest.id,
+                            name: manifest.name,
+                            version: manifest.version ?? 1,
+                            slots,
+                            ...(manifest.entry ? { entry: manifest.entry } : {}),
+                            ...(manifest.styles ? { styles: manifest.styles } : {}),
+                        });
+                    } catch {
+                        // Skip extensions with invalid manifests
+                    }
+                }
+            } catch (err) {
+                logger.error("Failed to scan extensions directory", { error: String(err) });
+            }
+
+            this.json(res, 200, { extensions });
+        });
+
+        // GET /api/extensions/:id/* — serve extension files
+        this.prefixRoute("GET", "/api/extensions/", async (req, res) => {
+            const url = new URL(req.url ?? "/", "http://localhost");
+            const prefix = "/api/extensions/";
+            const rest = decodeURIComponent(url.pathname.slice(prefix.length));
+            if (!rest) {
+                // This is the list endpoint, already handled by exact route
+                this.json(res, 404, { error: "Not Found" });
+                return;
+            }
+
+            const slashIdx = rest.indexOf("/");
+            if (slashIdx === -1) {
+                this.json(res, 400, { error: "Missing file path" });
+                return;
+            }
+
+            const extId = rest.slice(0, slashIdx);
+            const filePath = rest.slice(slashIdx + 1);
+
+            if (!extId || !filePath) {
+                this.json(res, 400, { error: "Missing extension ID or file path" });
+                return;
+            }
+
+            // Validate extension ID: alphanumeric, hyphens, underscores only (C1/C2)
+            if (!/^[a-zA-Z0-9_-]+$/.test(extId)) {
+                this.json(res, 400, { error: "Invalid extension ID" });
+                return;
+            }
+
+            // Prevent directory traversal via extension ID
+            const resolvedExtDir = resolve(extDir);
+            const extRoot = resolve(resolvedExtDir, extId);
+            if (!extRoot.startsWith(resolvedExtDir + "/")) {
+                this.json(res, 403, { error: "Forbidden" });
+                return;
+            }
+
+            // Prevent directory traversal via file path
+            const fullPath = resolve(extRoot, normalize(filePath));
+            if (!fullPath.startsWith(extRoot + "/") && fullPath !== extRoot) {
+                this.json(res, 403, { error: "Forbidden" });
+                return;
+            }
+
+            if (!existsSync(fullPath) || !statSync(fullPath).isFile()) {
+                this.json(res, 404, { error: "Not Found" });
+                return;
+            }
+
+            const ext = extname(fullPath);
+            const contentType = MIME_TYPES[ext] ?? "application/octet-stream";
+
+            res.writeHead(200, { "Content-Type": contentType });
+            createReadStream(fullPath).pipe(res);
+        });
+    }
 
     private prefixRoute(method: string, prefix: string, handler: RouteHandler): void {
         this.prefixRoutes.push({ prefix, method, handler });
@@ -213,8 +346,8 @@ export class HttpServer {
             let body: any;
             try {
                 body = await this.readJsonBody(req);
-            } catch {
-                this.json(res, 400, { error: "Invalid JSON body" });
+            } catch (err) {
+                this.handleBodyError(req, res, err);
                 return;
             }
 
@@ -285,8 +418,8 @@ export class HttpServer {
             let body: any;
             try {
                 body = await this.readJsonBody(req);
-            } catch {
-                this.json(res, 400, { error: "Invalid JSON body" });
+            } catch (err) {
+                this.handleBodyError(req, res, err);
                 return;
             }
 
@@ -351,6 +484,70 @@ export class HttpServer {
     private registerRoutes(): void {
         this.route("GET", "/api/ping", (_req, res) => {
             this.json(res, 200, { pong: true });
+        });
+
+        // ─── Auth Endpoints ────────────────────────────────────────
+
+        this.route("POST", "/api/auth/login", async (req, res) => {
+            let body: any;
+            try {
+                body = await this.readJsonBody(req);
+            } catch (err) {
+                this.handleBodyError(req, res, err);
+                return;
+            }
+
+            if (!body || typeof body.token !== "string") {
+                this.json(res, 400, { error: "Missing required field: token" });
+                return;
+            }
+
+            // Validate token using timing-safe comparison
+            const provided = Buffer.from(body.token);
+            const expected = Buffer.from(this.config.token);
+
+            let valid = false;
+            if (provided.length !== expected.length) {
+                const dummy = Buffer.alloc(expected.length);
+                timingSafeEqual(expected, dummy);
+            } else {
+                valid = timingSafeEqual(provided, expected);
+            }
+
+            if (!valid) {
+                const clientIp = this.getClientIp(req);
+                this.recordAuthFailure(clientIp);
+                this.json(res, 401, { error: "Unauthorized" });
+                return;
+            }
+
+            // Clean up expired sessions on login
+            const now = Date.now();
+            for (const [id, session] of this.sessions) {
+                if (now - session.createdAt >= SESSION_MAX_AGE_MS) {
+                    this.sessions.delete(id);
+                }
+            }
+
+            const sessionId = randomBytes(32).toString("hex");
+            this.sessions.set(sessionId, { createdAt: now });
+
+            const secure = this.config.trustProxy ? "; Secure" : "";
+            res.setHeader("Set-Cookie",
+                `nest-session=${sessionId}; HttpOnly; SameSite=Strict; Path=/${secure}`);
+            this.json(res, 200, { ok: true });
+        });
+
+        this.route("POST", "/api/auth/logout", async (req, res) => {
+            const sessionId = this.parseCookie(req);
+            if (sessionId) {
+                this.sessions.delete(sessionId);
+            }
+
+            const secure = this.config.trustProxy ? "; Secure" : "";
+            res.setHeader("Set-Cookie",
+                `nest-session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secure}`);
+            this.json(res, 200, { ok: true });
         });
 
         this.route("GET", "/api/status", (_req, res) => {
@@ -469,14 +666,23 @@ export class HttpServer {
             let body: Record<string, unknown>;
             try {
                 body = await this.readJsonBody(req);
-            } catch {
-                this.json(res, 400, { error: "Invalid JSON body" });
+            } catch (err) {
+                this.handleBodyError(req, res, err);
                 return;
             }
 
             if (!body || typeof body !== "object" || Array.isArray(body)) {
                 this.json(res, 400, { error: "Body must be a JSON object" });
                 return;
+            }
+
+            // Enforce config allowlist — immutable sections cannot be modified via API
+            const immutableSections = new Set(["server", "security", "token", "files"]);
+            for (const key of Object.keys(body)) {
+                if (immutableSections.has(key)) {
+                    this.json(res, 403, { error: `Cannot modify ${key} via API` });
+                    return;
+                }
             }
 
             try {
@@ -508,8 +714,8 @@ export class HttpServer {
             let body: any;
             try {
                 body = await this.readJsonBody(req);
-            } catch {
-                this.json(res, 400, { error: "Invalid JSON body" });
+            } catch (err) {
+                this.handleBodyError(req, res, err);
                 return;
             }
 
@@ -565,26 +771,50 @@ export class HttpServer {
         this.routes.get(path)!.set(method, handler);
     }
 
-    /** Extract real client IP, respecting reverse proxy headers */
+    /** Extract real client IP, respecting reverse proxy headers only when trustProxy is enabled */
     private getClientIp(req: IncomingMessage): string {
-        // X-Forwarded-For: leftmost entry is the original client
-        const xff = req.headers["x-forwarded-for"];
-        if (xff) {
-            const first = (Array.isArray(xff) ? xff[0] : xff).split(",")[0].trim();
-            if (first) return first;
-        }
-        // X-Real-IP: single IP set by some proxies (e.g. nginx)
-        const xri = req.headers["x-real-ip"];
-        if (xri) {
-            const ip = Array.isArray(xri) ? xri[0] : xri;
-            if (ip) return ip;
+        if (this.config.trustProxy) {
+            // X-Forwarded-For: leftmost entry is the original client
+            const xff = req.headers["x-forwarded-for"];
+            if (xff) {
+                const first = (Array.isArray(xff) ? xff[0] : xff).split(",")[0].trim();
+                if (first) return first;
+            }
+            // X-Real-IP: single IP set by some proxies (e.g. nginx)
+            const xri = req.headers["x-real-ip"];
+            if (xri) {
+                const ip = Array.isArray(xri) ? xri[0] : xri;
+                if (ip) return ip;
+            }
         }
         return req.socket.remoteAddress ?? "unknown";
     }
 
+    private setSecurityHeaders(res: ServerResponse): void {
+        res.setHeader("Content-Security-Policy",
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+            "img-src 'self' data: blob:; connect-src 'self'; frame-src blob: data:");
+        res.setHeader("X-Frame-Options", "DENY");
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+        res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+    }
+
     private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+        const startTime = Date.now();
+        let authResult: 'ok' | 'failed' | 'none' = 'none';
+
+        this.setSecurityHeaders(res);
+
         const url = new URL(req.url ?? "/", `http://localhost`);
         const pathname = url.pathname;
+
+        // Set up access logging for API routes (fires after response is sent)
+        if (pathname.startsWith("/api/") || pathname === "/attach") {
+            res.on('finish', () => {
+                this.logAccess(req, res, authResult, startTime);
+            });
+        }
 
         // Health endpoint — no auth required
         if (pathname === "/health" && (req.method ?? "GET") === "GET") {
@@ -607,13 +837,20 @@ export class HttpServer {
             return;
         }
 
-        // API and attach routes require auth
-        if (pathname.startsWith("/api/") || pathname === "/attach") {
+        // API and attach routes require auth (except login endpoint)
+        if ((pathname.startsWith("/api/") || pathname === "/attach") && pathname !== "/api/auth/login") {
             if (!this.authenticate(req)) {
+                authResult = 'failed';
                 this.recordAuthFailure(clientIp);
+                // Exponential backoff after 3 failures in current window
+                const failures = this.getAuthFailureCount(clientIp);
+                if (failures > 3) {
+                    await new Promise(r => setTimeout(r, Math.min(2 ** (failures - 3) * 1000, 30_000)));
+                }
                 this.json(res, 401, { error: "Unauthorized" });
                 return;
             }
+            authResult = 'ok';
         }
 
         // Set CORS headers on all responses if configured
@@ -681,12 +918,12 @@ export class HttpServer {
             return;
         }
 
-        // If Authorization header is present, authenticate immediately (TUI/programmatic clients)
-        const headerAuth = this.authenticate(req);
+        // Authenticate via session cookie or Authorization header
+        const preAuth = this.authenticate(req);
 
         this.wss.handleUpgrade(req, socket, head, (ws) => {
             const clientId = `ws-${++this.wsClientCounter}`;
-            let authenticated = headerAuth;
+            let authenticated = preAuth;
 
             // Keep-alive: ping every 30s so proxies/NAT don't drop idle connections.
             // The ws package handles pong responses automatically.
@@ -706,7 +943,8 @@ export class HttpServer {
             } else {
                 // Already authenticated via header — add to clients immediately
                 this.wsClients.set(clientId, ws);
-                logger.info("WebSocket client connected at /attach (header auth)", { clientId });
+                this.wsSend(ws, { type: "auth_ok" });
+                logger.info("WebSocket client connected at /attach (pre-authenticated)", { clientId });
             }
 
             ws.on("message", async (rawData) => {
@@ -720,18 +958,36 @@ export class HttpServer {
 
                 // Handle first-message auth for browser clients
                 if (!authenticated) {
-                    if (msg.type === "auth" && msg.token === this.config.token) {
-                        authenticated = true;
-                        if (authTimeout) clearTimeout(authTimeout);
-                        this.wsClients.set(clientId, ws);
-                        this.wsSend(ws, { type: "auth_ok" });
-                        logger.info("WebSocket client connected at /attach (message auth)", { clientId });
-                        return;
+                    if (msg.type === "auth" && typeof msg.token === "string") {
+                        const provided = Buffer.from(msg.token);
+                        const expected = Buffer.from(this.config.token);
+                        let valid = false;
+                        if (provided.length === expected.length) {
+                            valid = timingSafeEqual(provided, expected);
+                        } else {
+                            const dummy = Buffer.alloc(expected.length);
+                            timingSafeEqual(expected, dummy);
+                        }
+                        if (valid) {
+                            authenticated = true;
+                            if (authTimeout) clearTimeout(authTimeout);
+                            this.wsClients.set(clientId, ws);
+                            this.wsSend(ws, { type: "auth_ok" });
+                            logger.info("WebSocket client connected at /attach (message auth)", { clientId });
+                            return;
+                        }
                     }
                     // Auth failed
                     if (authTimeout) clearTimeout(authTimeout);
                     this.wsSend(ws, { type: "error", error: "Unauthorized" });
                     ws.close(4003, "Unauthorized");
+                    return;
+                }
+
+                // Per-client message rate limiting
+                if (this.isWsRateLimited(clientId)) {
+                    this.wsSend(ws, { type: "error", error: "Rate limit exceeded" });
+                    ws.close(4008, "Rate limit exceeded");
                     return;
                 }
 
@@ -758,6 +1014,7 @@ export class HttpServer {
                 clearInterval(pingInterval);
                 if (authTimeout) clearTimeout(authTimeout);
                 this.wsClients.delete(clientId);
+                this.wsRateLimits.delete(clientId);
                 logger.info("WebSocket client disconnected", { clientId });
             });
 
@@ -766,6 +1023,7 @@ export class HttpServer {
                 if (authTimeout) clearTimeout(authTimeout);
                 logger.error("WebSocket client error", { error: String(err), clientId });
                 this.wsClients.delete(clientId);
+                this.wsRateLimits.delete(clientId);
             });
         });
     }
@@ -778,13 +1036,45 @@ export class HttpServer {
     }
 
     private authenticate(req: IncomingMessage): boolean {
+        // Check session cookie first (browser clients)
+        const sessionId = this.parseCookie(req);
+        if (sessionId) {
+            const session = this.sessions.get(sessionId);
+            if (session) {
+                if (Date.now() - session.createdAt < SESSION_MAX_AGE_MS) {
+                    return true;
+                }
+                // Session expired — remove it
+                this.sessions.delete(sessionId);
+            }
+        }
+
+        // Fall back to Bearer token (TUI/programmatic clients)
         const auth = req.headers["authorization"];
         if (!auth) return false;
 
         const parts = auth.split(" ");
         if (parts.length !== 2 || parts[0] !== "Bearer") return false;
 
-        return parts[1] === this.config.token;
+        const provided = Buffer.from(parts[1]);
+        const expected = Buffer.from(this.config.token);
+
+        // Avoid length-based timing leak: compare expected against a zero-filled
+        // buffer so attacker can't learn expected content from the comparison.
+        if (provided.length !== expected.length) {
+            const dummy = Buffer.alloc(expected.length);
+            timingSafeEqual(expected, dummy);
+            return false;
+        }
+
+        return timingSafeEqual(provided, expected);
+    }
+
+    private parseCookie(req: IncomingMessage): string | null {
+        const cookie = req.headers.cookie;
+        if (!cookie) return null;
+        const match = cookie.match(/(?:^|;\s*)nest-session=([^\s;]+)/);
+        return match ? match[1] : null;
     }
 
     private serveStatic(pathname: string, res: ServerResponse): void {
@@ -812,10 +1102,41 @@ export class HttpServer {
         createReadStream(resolved).pipe(res);
     }
 
+    private handleBodyError(req: IncomingMessage, res: ServerResponse, err: unknown): void {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg === "Payload Too Large") {
+            this.json(res, 413, { error: "Payload Too Large" });
+        } else if (msg === "Unsupported Media Type") {
+            this.json(res, 415, { error: "Unsupported Media Type" });
+        } else {
+            this.json(res, 400, { error: "Invalid JSON body" });
+        }
+        // Destroy request after sending response to stop data flow
+        req.destroy();
+    }
+
     private readJsonBody(req: IncomingMessage): Promise<any> {
         return new Promise((resolve, reject) => {
+            // Validate Content-Type if present — caller destroys req after sending response
+            const contentType = req.headers["content-type"];
+            if (contentType && !contentType.startsWith("application/json")) {
+                reject(new Error("Unsupported Media Type"));
+                return;
+            }
+
+            let size = 0;
             let data = "";
-            req.on("data", (chunk: Buffer) => { data += chunk.toString(); });
+            let destroyed = false;
+            req.on("data", (chunk: Buffer) => {
+                if (destroyed) return;
+                size += chunk.length;
+                if (size > MAX_BODY_SIZE) {
+                    destroyed = true;
+                    reject(new Error("Payload Too Large"));
+                    return;
+                }
+                data += chunk.toString();
+            });
             req.on("end", () => {
                 try {
                     resolve(JSON.parse(data));
@@ -849,6 +1170,15 @@ export class HttpServer {
         return false;
     }
 
+    private isWsRateLimited(clientId: string): boolean {
+        const now = Date.now();
+        const timestamps = this.wsRateLimits.get(clientId) ?? [];
+        const recent = timestamps.filter((t) => now - t < WS_RATE_WINDOW_MS);
+        recent.push(now);
+        this.wsRateLimits.set(clientId, recent);
+        return recent.length > WS_RATE_MAX;
+    }
+
     private recordAuthFailure(ip: string): void {
         const now = Date.now();
         const timestamps = this.authRateLimits.get(ip) ?? [];
@@ -871,11 +1201,33 @@ export class HttpServer {
         return recent.length >= AUTH_RATE_MAX;
     }
 
+    private getAuthFailureCount(ip: string): number {
+        const timestamps = this.authRateLimits.get(ip);
+        if (!timestamps) return 0;
+        const now = Date.now();
+        return timestamps.filter(t => now - t < AUTH_RATE_WINDOW_MS).length;
+    }
+
     private setCorsHeaders(res: ServerResponse): void {
         if (!this.config.cors) return;
         res.setHeader("Access-Control-Allow-Origin", this.config.cors.origin);
         res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
         res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    }
+
+    private logAccess(req: IncomingMessage, res: ServerResponse, authResult: 'ok' | 'failed' | 'none', startTime: number): void {
+        const durationMs = Date.now() - startTime;
+        const ip = this.getClientIp(req);
+        const method = req.method ?? "GET";
+        const url = new URL(req.url ?? "/", "http://localhost");
+        const path = url.pathname;
+        const status = res.statusCode;
+
+        logger.info("access", { ip, method, path, status, auth: authResult, durationMs });
+
+        if (authResult === "failed") {
+            logger.warn("auth_failed", { ip, method, path, reason: "invalid credentials" });
+        }
     }
 
     private json(res: ServerResponse, status: number, body: unknown): void {
