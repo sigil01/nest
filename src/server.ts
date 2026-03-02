@@ -218,16 +218,28 @@ export class HttpServer {
                     if (!existsSync(manifestPath)) continue;
                     try {
                         const raw = readFileSync(manifestPath, "utf-8");
-                        const manifest = yaml.load(raw) as ExtensionManifest;
-                        if (manifest && manifest.id && manifest.name && manifest.entry) {
-                            extensions.push({
-                                id: manifest.id,
-                                name: manifest.name,
-                                version: manifest.version ?? 1,
-                                entry: manifest.entry,
-                                ...(manifest.styles ? { styles: manifest.styles } : {}),
-                            });
+                        const manifest = yaml.load(raw) as Record<string, any>;
+                        if (!manifest || !manifest.id || !manifest.name) continue;
+
+                        // Build slots array: new format has `slots`, old format has `entry`
+                        let slots: ExtensionManifest['slots'];
+                        if (Array.isArray(manifest.slots)) {
+                            slots = manifest.slots;
+                        } else if (manifest.entry) {
+                            // Auto-convert old single-entry manifest to slots format
+                            slots = [{ type: 'dashboard', entry: manifest.entry }];
+                        } else {
+                            continue; // No slots and no entry — skip
                         }
+
+                        extensions.push({
+                            id: manifest.id,
+                            name: manifest.name,
+                            version: manifest.version ?? 1,
+                            slots,
+                            ...(manifest.entry ? { entry: manifest.entry } : {}),
+                            ...(manifest.styles ? { styles: manifest.styles } : {}),
+                        });
                     } catch {
                         // Skip extensions with invalid manifests
                     }
@@ -781,7 +793,7 @@ export class HttpServer {
     private setSecurityHeaders(res: ServerResponse): void {
         res.setHeader("Content-Security-Policy",
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
-            "img-src 'self' data: blob:; connect-src 'self'");
+            "img-src 'self' data: blob:; connect-src 'self'; frame-src blob: data:");
         res.setHeader("X-Frame-Options", "DENY");
         res.setHeader("X-Content-Type-Options", "nosniff");
         res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");

@@ -108,11 +108,19 @@ export interface ExtensionsConfig {
     dir: string;
 }
 
+export interface ExtensionSlotConfig {
+    type: 'dashboard' | 'sidebar' | 'toolbar' | 'viewer';
+    entry: string;
+    defaultHeight?: number;
+}
+
 export interface ExtensionManifest {
     id: string;
     name: string;
     version: number;
-    entry: string;
+    slots: ExtensionSlotConfig[];
+    // Backward compat with old manifests (entry + optional styles, no slots)
+    entry?: string;
     styles?: string;
 }
 

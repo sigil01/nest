@@ -382,7 +382,7 @@ describe("Security hardening (Phase 1)", () => {
     });
 
     const EXPECTED_HEADERS = {
-        "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'",
+        "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src blob: data:",
         "x-frame-options": "DENY",
         "x-content-type-options": "nosniff",
         "referrer-policy": "strict-origin-when-cross-origin",
