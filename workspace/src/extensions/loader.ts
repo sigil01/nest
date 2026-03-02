@@ -1,14 +1,12 @@
 import type { ExtensionRegistry } from "./registry";
 import type { ExtensionManifest } from "./types";
 import { createNestAPI } from "./api";
-import { getToken } from "../api";
 
 export async function loadExtensions(registry: ExtensionRegistry): Promise<void> {
     let manifests: ExtensionManifest[];
     try {
-        const token = getToken();
         const res = await fetch("/api/extensions", {
-            headers: { Authorization: `Bearer ${token}` },
+            credentials: 'include',
         });
         if (!res.ok) {
             console.warn("[extensions] Failed to fetch extension list:", res.status);

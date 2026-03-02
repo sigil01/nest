@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef, lazy, Suspense } from "react";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
-import { fetchFile, putFile, fetchFiles, rawFileUrl, getToken } from "../api";
+import { fetchFile, putFile, fetchFiles, rawFileUrl } from "../api";
 import { useFileViewer as useExtFileViewer, ExtensionSlot } from "../extensions";
 
 const Editor = lazy(() => import("./Editor"));
@@ -36,16 +36,15 @@ function isTextFile(path: string): boolean {
     return ext === ".md" || ext === ".excalidraw" || ext === ".txt" || ext === "" || isCodeFile(path);
 }
 
-/** Fetch a raw file as a blob URL, including auth header */
+/** Fetch a raw file as a blob URL, with cookie auth */
 function useAuthBlobUrl(root: string, path: string, enabled: boolean): string | null {
     const [blobUrl, setBlobUrl] = useState<string | null>(null);
 
     useEffect(() => {
         if (!enabled) { setBlobUrl(null); return; }
         let revoked = false;
-        const token = getToken();
         fetch(rawFileUrl(root, path), {
-            headers: { Authorization: `Bearer ${token}` },
+            credentials: 'include',
         })
             .then((res) => {
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);

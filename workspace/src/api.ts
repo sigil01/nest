@@ -1,36 +1,34 @@
-// ─── Token Management ─────────────────────────────────────────
+// ─── Auth ─────────────────────────────────────────────────────
 
-const TOKEN_KEY = "sb-token";
-
-export function getToken(): string {
-    return sessionStorage.getItem(TOKEN_KEY) ?? "";
+export async function login(token: string): Promise<boolean> {
+    const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ token }),
+    });
+    return res.ok;
 }
 
-export function setToken(token: string): void {
-    sessionStorage.setItem(TOKEN_KEY, token);
+export async function logout(): Promise<void> {
+    await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'include',
+    });
 }
 
-export function clearToken(): void {
-    sessionStorage.removeItem(TOKEN_KEY);
-}
-
-/** Check hash fragment for token (/#token=xxx), store it, clean URL */
-export function extractHashToken(): string | null {
-    const hash = window.location.hash.slice(1);
-    const params = new URLSearchParams(hash);
-    const token = params.get("token");
-    if (token) {
-        setToken(token);
-        window.history.replaceState({}, "", window.location.pathname);
-        return token;
+export async function checkAuth(): Promise<boolean> {
+    try {
+        const res = await fetch('/api/ping', { credentials: 'include' });
+        return res.ok;
+    } catch {
+        return false;
     }
-    return null;
 }
 
 // ─── Fetch Wrapper ────────────────────────────────────────────
 
 async function apiFetch<T = unknown>(path: string, init?: RequestInit): Promise<T> {
-    const token = getToken();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15_000);
 
@@ -38,9 +36,9 @@ async function apiFetch<T = unknown>(path: string, init?: RequestInit): Promise<
         const res = await fetch(path, {
             ...init,
             signal: controller.signal,
+            credentials: 'include',
             headers: {
                 ...init?.headers,
-                Authorization: `Bearer ${token}`,
                 ...(init?.body ? { "Content-Type": "application/json" } : {}),
             },
         });

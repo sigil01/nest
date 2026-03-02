@@ -1,6 +1,5 @@
 import type { ExtensionRegistry } from "./registry";
 import type { Disposable } from "./types";
-import { getToken } from "../api";
 
 export interface NestAPI {
     toolbar: {
@@ -142,34 +141,31 @@ export function createNestAPI(registry: ExtensionRegistry, extensionId: string):
 
         api: {
             async fetch(path: string, init?: RequestInit): Promise<Response> {
-                const token = getToken();
                 return globalThis.fetch(path, {
                     ...init,
+                    credentials: 'include',
                     headers: {
                         ...init?.headers,
-                        Authorization: `Bearer ${token}`,
                     },
                 });
             },
             async fetchFile(root: string, path: string): Promise<{ content: string }> {
-                const token = getToken();
                 const encoded = path.split("/").map(encodeURIComponent).join("/");
                 const res = await globalThis.fetch(
                     `/api/files/${encodeURIComponent(root)}/${encoded}`,
-                    { headers: { Authorization: `Bearer ${token}` } }
+                    { credentials: 'include' }
                 );
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 return res.json();
             },
             async saveFile(root: string, path: string, content: string): Promise<void> {
-                const token = getToken();
                 const encoded = path.split("/").map(encodeURIComponent).join("/");
                 const res = await globalThis.fetch(
                     `/api/files/${encodeURIComponent(root)}/${encoded}`,
                     {
                         method: "PUT",
+                        credentials: 'include',
                         headers: {
-                            Authorization: `Bearer ${token}`,
                             "Content-Type": "application/json",
                         },
                         body: JSON.stringify({ content }),

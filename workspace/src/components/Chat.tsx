@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { getToken } from "../api";
 
 // ─── Block-based message model ────────────────────────────────
 
@@ -223,15 +222,13 @@ export default function Chat() {
     }, [messages, scrollToBottom]);
 
     const connect = useCallback(() => {
-        const token = getToken();
-        if (!token) return;
-
         const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
         const ws = new WebSocket(`${proto}//${window.location.host}/attach`);
         wsRef.current = ws;
 
         ws.onopen = () => {
-            ws.send(JSON.stringify({ type: "auth", token }));
+            // Cookie is sent automatically on upgrade — no post-connect auth needed
+            setConnected(true);
         };
 
         ws.onclose = () => {
@@ -249,14 +246,6 @@ export default function Chat() {
             if (!mountedRef.current) return;
             try {
                 const data = JSON.parse(event.data);
-                if (data.type === "auth_ok") {
-                    setConnected(true);
-                    return;
-                }
-                if (data.type === "error" && !connected) {
-                    ws.close();
-                    return;
-                }
                 handleWsMessage(data);
             } catch {
                 // ignore malformed messages
