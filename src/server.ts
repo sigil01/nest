@@ -1,7 +1,7 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
 import { createReadStream, existsSync, statSync, readdirSync, readFileSync } from "node:fs";
 import { join, extname, resolve, normalize } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import { writeFileSync } from "node:fs";
 import yaml from "js-yaml";
@@ -65,6 +65,11 @@ const WEBHOOK_GLOBAL_BUCKET = "__global__";
 
 const AUTH_RATE_WINDOW_MS = 60_000;
 const AUTH_RATE_MAX = 10;
+
+const MAX_BODY_SIZE = 1_048_576; // 1MB
+
+const WS_RATE_WINDOW_MS = 60_000;
+const WS_RATE_MAX = 60;
 
 type RouteHandler = (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
 export type WsRpcHandler = (message: { type: string; [key: string]: unknown }, clientId: string) => Promise<any>;
@@ -324,8 +329,8 @@ export class HttpServer {
             let body: any;
             try {
                 body = await this.readJsonBody(req);
-            } catch {
-                this.json(res, 400, { error: "Invalid JSON body" });
+            } catch (err) {
+                this.handleBodyError(res, err);
                 return;
             }
 
@@ -396,8 +401,8 @@ export class HttpServer {
             let body: any;
             try {
                 body = await this.readJsonBody(req);
-            } catch {
-                this.json(res, 400, { error: "Invalid JSON body" });
+            } catch (err) {
+                this.handleBodyError(res, err);
                 return;
             }
 
@@ -580,8 +585,8 @@ export class HttpServer {
             let body: Record<string, unknown>;
             try {
                 body = await this.readJsonBody(req);
-            } catch {
-                this.json(res, 400, { error: "Invalid JSON body" });
+            } catch (err) {
+                this.handleBodyError(res, err);
                 return;
             }
 
@@ -619,8 +624,8 @@ export class HttpServer {
             let body: any;
             try {
                 body = await this.readJsonBody(req);
-            } catch {
-                this.json(res, 400, { error: "Invalid JSON body" });
+            } catch (err) {
+                this.handleBodyError(res, err);
                 return;
             }
 
@@ -693,7 +698,20 @@ export class HttpServer {
         return req.socket.remoteAddress ?? "unknown";
     }
 
+    private setSecurityHeaders(res: ServerResponse): void {
+        res.setHeader("Content-Security-Policy",
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+            "img-src 'self' data: blob:; connect-src 'self' wss:");
+        res.setHeader("X-Frame-Options", "DENY");
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+        res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+        res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+    }
+
     private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+        this.setSecurityHeaders(res);
+
         const url = new URL(req.url ?? "/", `http://localhost`);
         const pathname = url.pathname;
 
@@ -895,7 +913,17 @@ export class HttpServer {
         const parts = auth.split(" ");
         if (parts.length !== 2 || parts[0] !== "Bearer") return false;
 
-        return parts[1] === this.config.token;
+        const provided = Buffer.from(parts[1]);
+        const expected = Buffer.from(this.config.token);
+
+        // Avoid length-based timing leak: if lengths differ, compare against
+        // expected vs itself so we still burn the same CPU time.
+        if (provided.length !== expected.length) {
+            timingSafeEqual(expected, expected);
+            return false;
+        }
+
+        return timingSafeEqual(provided, expected);
     }
 
     private serveStatic(pathname: string, res: ServerResponse): void {
@@ -923,10 +951,37 @@ export class HttpServer {
         createReadStream(resolved).pipe(res);
     }
 
+    private handleBodyError(res: ServerResponse, err: unknown): void {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg === "Payload Too Large") {
+            this.json(res, 413, { error: "Payload Too Large" });
+        } else if (msg === "Unsupported Media Type") {
+            this.json(res, 415, { error: "Unsupported Media Type" });
+        } else {
+            this.json(res, 400, { error: "Invalid JSON body" });
+        }
+    }
+
     private readJsonBody(req: IncomingMessage): Promise<any> {
         return new Promise((resolve, reject) => {
+            // Validate Content-Type if present
+            const contentType = req.headers["content-type"];
+            if (contentType && !contentType.startsWith("application/json")) {
+                reject(new Error("Unsupported Media Type"));
+                return;
+            }
+
+            let size = 0;
             let data = "";
-            req.on("data", (chunk: Buffer) => { data += chunk.toString(); });
+            req.on("data", (chunk: Buffer) => {
+                size += chunk.length;
+                if (size > MAX_BODY_SIZE) {
+                    req.destroy();
+                    reject(new Error("Payload Too Large"));
+                    return;
+                }
+                data += chunk.toString();
+            });
             req.on("end", () => {
                 try {
                     resolve(JSON.parse(data));
