@@ -52,6 +52,12 @@ function validate(config: unknown): asserts config is Config {
                 "with wildcard origins. Use an explicit origin like 'https://example.com'."
             );
         }
+        if (c.server.trustProxy !== undefined && typeof c.server.trustProxy !== "boolean") {
+            throw new Error("config: server.trustProxy must be a boolean");
+        }
+        if (c.server.host !== undefined && typeof c.server.host !== "string") {
+            throw new Error("config: server.host must be a string");
+        }
     }
     if (c.files) {
         if (!c.files.roots || typeof c.files.roots !== "object" || Array.isArray(c.files.roots)) {

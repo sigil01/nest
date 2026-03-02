@@ -89,6 +89,7 @@ export class HttpServer {
     private wss: WebSocketServer;
     private wsClients = new Map<string, WebSocket>();
     private wsClientCounter = 0;
+    private wsRateLimits = new Map<string, number[]>();
     private wsHandler?: WsRpcHandler;
     private workspaceFiles?: WorkspaceFiles;
     private extensionsConfig?: ExtensionsConfig;
@@ -144,11 +145,12 @@ export class HttpServer {
     }
 
     async start(): Promise<void> {
+        const host = this.config.host ?? "127.0.0.1";
         return new Promise((resolve, reject) => {
             this.server.once("error", reject);
-            this.server.listen(this.config.port, "0.0.0.0", () => {
+            this.server.listen(this.config.port, host, () => {
                 this.server.removeListener("error", reject);
-                logger.info("HTTP server listening", { port: this.config.port });
+                logger.info("HTTP server listening", { port: this.config.port, host });
                 resolve();
             });
         });
@@ -681,19 +683,21 @@ export class HttpServer {
         this.routes.get(path)!.set(method, handler);
     }
 
-    /** Extract real client IP, respecting reverse proxy headers */
+    /** Extract real client IP, respecting reverse proxy headers only when trustProxy is enabled */
     private getClientIp(req: IncomingMessage): string {
-        // X-Forwarded-For: leftmost entry is the original client
-        const xff = req.headers["x-forwarded-for"];
-        if (xff) {
-            const first = (Array.isArray(xff) ? xff[0] : xff).split(",")[0].trim();
-            if (first) return first;
-        }
-        // X-Real-IP: single IP set by some proxies (e.g. nginx)
-        const xri = req.headers["x-real-ip"];
-        if (xri) {
-            const ip = Array.isArray(xri) ? xri[0] : xri;
-            if (ip) return ip;
+        if (this.config.trustProxy) {
+            // X-Forwarded-For: leftmost entry is the original client
+            const xff = req.headers["x-forwarded-for"];
+            if (xff) {
+                const first = (Array.isArray(xff) ? xff[0] : xff).split(",")[0].trim();
+                if (first) return first;
+            }
+            // X-Real-IP: single IP set by some proxies (e.g. nginx)
+            const xri = req.headers["x-real-ip"];
+            if (xri) {
+                const ip = Array.isArray(xri) ? xri[0] : xri;
+                if (ip) return ip;
+            }
         }
         return req.socket.remoteAddress ?? "unknown";
     }
@@ -864,6 +868,13 @@ export class HttpServer {
                     return;
                 }
 
+                // Per-client message rate limiting
+                if (this.isWsRateLimited(clientId)) {
+                    this.wsSend(ws, { type: "error", error: "Rate limit exceeded" });
+                    ws.close(4008, "Rate limit exceeded");
+                    return;
+                }
+
                 if (!msg.type) {
                     this.wsSend(ws, { id: msg.id, type: "response", success: false, error: "Missing type" });
                     return;
@@ -887,6 +898,7 @@ export class HttpServer {
                 clearInterval(pingInterval);
                 if (authTimeout) clearTimeout(authTimeout);
                 this.wsClients.delete(clientId);
+                this.wsRateLimits.delete(clientId);
                 logger.info("WebSocket client disconnected", { clientId });
             });
 
@@ -895,6 +907,7 @@ export class HttpServer {
                 if (authTimeout) clearTimeout(authTimeout);
                 logger.error("WebSocket client error", { error: String(err), clientId });
                 this.wsClients.delete(clientId);
+                this.wsRateLimits.delete(clientId);
             });
         });
     }
@@ -1012,6 +1025,21 @@ export class HttpServer {
 
         recent.push(now);
         this.webhookRateLimits.set(bucket, recent);
+        return false;
+    }
+
+    private isWsRateLimited(clientId: string): boolean {
+        const now = Date.now();
+        const timestamps = this.wsRateLimits.get(clientId) ?? [];
+        const recent = timestamps.filter((t) => now - t < WS_RATE_WINDOW_MS);
+
+        if (recent.length >= WS_RATE_MAX) {
+            this.wsRateLimits.set(clientId, recent);
+            return true;
+        }
+
+        recent.push(now);
+        this.wsRateLimits.set(clientId, recent);
         return false;
     }
 

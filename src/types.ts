@@ -58,6 +58,8 @@ export interface ServerConfig {
     token: string;
     publicDir?: string;
     cors?: CorsConfig;
+    trustProxy?: boolean;
+    host?: string;
 }
 
 // ─── Session & Routing Types ──────────────────────────────────
@@ -240,6 +242,6 @@ export type ConfigRedacted = {
         : K extends "matrix"
           ? { homeserver: string; user: string; token: string; storage_path?: string } | undefined
           : K extends "server"
-            ? { port: number; token: string; publicDir?: string; cors?: CorsConfig } | undefined
+            ? { port: number; token: string; publicDir?: string; cors?: CorsConfig; trustProxy?: boolean; host?: string } | undefined
             : Config[K];
 };
