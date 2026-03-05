@@ -224,6 +224,61 @@ describe("Bridge", () => {
         expect(response).toBe("All done!");
     });
 
+    it("accumulates all text when no onText callback (cron path)", async () => {
+        // Simulate: text → tool → more text (final), but NO onText callback
+        // This is the cron job path — all text should be in the final response
+        const { proc, stdin, stdout } = createMockProcess();
+        stdin.removeAllListeners("data");
+        stdin.on("data", (chunk: Buffer) => {
+            const lines = chunk.toString().split("\n").filter(Boolean);
+            for (const line of lines) {
+                let cmd: any;
+                try { cmd = JSON.parse(line); } catch { continue; }
+
+                stdout.write(
+                    JSON.stringify({ id: cmd.id, type: "response", command: cmd.type, success: true }) + "\n"
+                );
+
+                if (cmd.type === "prompt") {
+                    stdout.write(JSON.stringify({ type: "agent_start" }) + "\n");
+                    // Intermediate text
+                    stdout.write(JSON.stringify({
+                        type: "message_update",
+                        assistantMessageEvent: { type: "text_delta", delta: "Here's a fact: " },
+                    }) + "\n");
+                    // Tool fires — should NOT clear text (no onText)
+                    stdout.write(JSON.stringify({
+                        type: "tool_execution_start",
+                        toolCallId: "tc-1",
+                        toolName: "write_memory",
+                        args: {},
+                    }) + "\n");
+                    stdout.write(JSON.stringify({
+                        type: "tool_execution_end",
+                        toolCallId: "tc-1",
+                        toolName: "write_memory",
+                        isError: false,
+                    }) + "\n");
+                    // Final text
+                    stdout.write(JSON.stringify({
+                        type: "message_update",
+                        assistantMessageEvent: { type: "text_delta", delta: "Memory saved!" },
+                    }) + "\n");
+                    stdout.write(JSON.stringify({ type: "agent_end" }) + "\n");
+                }
+            }
+        });
+
+        bridge = new Bridge({ cwd: "/tmp", spawnFn: () => proc as any });
+        bridge.start();
+
+        // No onText, no onToolStart — cron-style call
+        const response = await bridge.sendMessage("test");
+
+        // Should contain ALL text, not just the part after the last tool
+        expect(response).toBe("Here's a fact: Memory saved!");
+    });
+
     it("reports busy when messages are in flight", async () => {
         const { proc, stdin, stdout } = createMockProcess();
         // Replace handler: ack RPCs but hold agent_end

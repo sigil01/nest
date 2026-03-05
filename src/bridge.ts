@@ -197,10 +197,13 @@ export class Bridge extends EventEmitter {
             if (current) {
                 // Flush intermediate text before tool call
                 const text = this.responseText.trim();
-                if (text && current.onText) {
-                    current.onText(text);
+                if (current.onText) {
+                    // Interactive path: send intermediate text to listener immediately
+                    if (text) current.onText(text);
+                    this.responseText = "";
                 }
-                this.responseText = "";
+                // No onText (e.g. cron): keep accumulating into responseText
+                // so the full response is available at agent_end
 
                 if (current.onToolStart) {
                     current.onToolStart({
