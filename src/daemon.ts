@@ -271,6 +271,14 @@ export class Daemon implements DaemonRef, DashboardProvider {
                     });
                 }
             });
+            this.scheduler.on("aborted", ({ job }: { job: JobDefinition }) => {
+                const notifyRoom = this.resolveNotify(job);
+                if (notifyRoom) {
+                    this.sendToRoom(notifyRoom, `⏹️ Cron job \`${job.name}\` aborted.`, `cron:${job.name}`).catch((err) => {
+                        logger.error("Failed to send cron abort notice", { job: job.name, error: String(err) });
+                    });
+                }
+            });
             this.scheduler.on("tool-start", ({ job, info }: { job: JobDefinition; info: ToolCallInfo }) => {
                 const notifyRoom = this.resolveNotify(job);
                 if (notifyRoom) {

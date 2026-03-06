@@ -326,6 +326,58 @@ Do the thing.`);
         scheduler.stop();
     });
 
+    it("emits aborted event when prompt is interrupted by user", async () => {
+        await writeJob("test", `---
+schedule: "0 7 * * *"
+steps:
+  - prompt
+---
+
+Do the thing.`);
+
+        const bridge = makeBridge({
+            sendMessage: vi.fn().mockRejectedValue(new Error("Interrupted by bot!abort")),
+        });
+        const scheduler = new Scheduler({ dir: cronDir }, bridge);
+        const aborted: any[] = [];
+        const responses: any[] = [];
+        scheduler.on("aborted", (e: any) => aborted.push(e));
+        scheduler.on("response", (r: any) => responses.push(r));
+        await scheduler.start();
+
+        await getLastScheduledCallback()!();
+
+        expect(aborted).toHaveLength(1);
+        expect(aborted[0].job.name).toBe("test");
+        expect(responses).toHaveLength(0);
+
+        scheduler.stop();
+    });
+
+    it("emits aborted event for Cancelled errors too", async () => {
+        await writeJob("test", `---
+schedule: "0 7 * * *"
+steps:
+  - prompt
+---
+
+Do the thing.`);
+
+        const bridge = makeBridge({
+            sendMessage: vi.fn().mockRejectedValue(new Error("Cancelled")),
+        });
+        const scheduler = new Scheduler({ dir: cronDir }, bridge);
+        const aborted: any[] = [];
+        scheduler.on("aborted", (e: any) => aborted.push(e));
+        await scheduler.start();
+
+        await getLastScheduledCallback()!();
+
+        expect(aborted).toHaveLength(1);
+
+        scheduler.stop();
+    });
+
     it("executes reload step", async () => {
         await writeJob("test", `---
 schedule: "0 7 * * *"

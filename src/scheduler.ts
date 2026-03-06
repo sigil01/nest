@@ -201,10 +201,16 @@ export class Scheduler extends EventEmitter {
             try {
                 await this.executeStep(step, job, bridge);
             } catch (err) {
+                const message = String(err instanceof Error ? err.message : err);
+                if (message.includes("Interrupted") || message.includes("Cancelled")) {
+                    logger.info("Cron job interrupted by user", { name: job.name, step: step.type });
+                    this.emit("aborted", { job });
+                    return;
+                }
                 logger.error("Step failed, aborting job", {
                     name: job.name,
                     step: step.type,
-                    error: String(err),
+                    error: message,
                 });
                 return;
             }
