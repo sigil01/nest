@@ -263,6 +263,22 @@ export class Daemon implements DaemonRef, DashboardProvider {
                     logger.error("Unhandled error in scheduler response", { job: job.name, error: String(err) });
                 });
             });
+            this.scheduler.on("text", ({ job, text }: { job: JobDefinition; text: string }) => {
+                const notifyRoom = this.resolveNotify(job);
+                if (notifyRoom) {
+                    this.sendToRoom(notifyRoom, text, `cron:${job.name}`).catch((err) => {
+                        logger.error("Failed to send cron text", { job: job.name, error: String(err) });
+                    });
+                }
+            });
+            this.scheduler.on("tool-start", ({ job, info }: { job: JobDefinition; info: ToolCallInfo }) => {
+                const notifyRoom = this.resolveNotify(job);
+                if (notifyRoom) {
+                    this.sendToRoom(notifyRoom, formatToolCall(info), `cron:${job.name}`).catch((err) => {
+                        logger.error("Failed to send cron tool update", { job: job.name, error: String(err) });
+                    });
+                }
+            });
             this.scheduler.on("job-start", ({ session }: { job: string; session: string }) => {
                 this.activeSource.set(session, { type: "cron" });
             });

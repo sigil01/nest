@@ -245,7 +245,16 @@ export class Scheduler extends EventEmitter {
 
             case "prompt": {
                 const message = `[CRON:${job.name}] ${job.body}`;
-                const response = await bridge.sendMessage(message);
+                const response = await bridge.sendMessage(message, {
+                    onText: (text) => {
+                        if (text.trim()) {
+                            this.emit("text", { job, text });
+                        }
+                    },
+                    onToolStart: (info) => {
+                        this.emit("tool-start", { job, info });
+                    },
+                });
                 if (response && response.trim()) {
                     this.emit("response", { job, response });
                 }

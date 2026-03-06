@@ -250,7 +250,10 @@ Do the thing.`);
 
         await getLastScheduledCallback()!();
 
-        expect(bridge.sendMessage).toHaveBeenCalledWith("[CRON:test] Do the thing.");
+        expect(bridge.sendMessage).toHaveBeenCalledWith("[CRON:test] Do the thing.", expect.objectContaining({
+            onText: expect.any(Function),
+            onToolStart: expect.any(Function),
+        }));
         expect(responses).toHaveLength(1);
         expect(responses[0].response).toBe("agent response");
         expect(responses[0].job.name).toBe("test");
@@ -276,6 +279,49 @@ Do the thing.`);
         await getLastScheduledCallback()!();
 
         expect(responses).toHaveLength(0);
+
+        scheduler.stop();
+    });
+
+    it("emits text and tool-start events during prompt step", async () => {
+        await writeJob("test", `---
+schedule: "0 7 * * *"
+steps:
+  - prompt
+---
+
+Do the thing.`);
+
+        // Capture the onText/onToolStart callbacks when sendMessage is called
+        let capturedOnText: ((text: string) => void) | undefined;
+        let capturedOnToolStart: ((info: any) => void) | undefined;
+
+        const bridge = makeBridge({
+            sendMessage: vi.fn().mockImplementation((_msg: string, opts?: any) => {
+                capturedOnText = opts?.onText;
+                capturedOnToolStart = opts?.onToolStart;
+                // Simulate bridge calling the callbacks during execution
+                if (capturedOnText) capturedOnText("Here's the morning hello");
+                if (capturedOnToolStart) capturedOnToolStart({ toolName: "write", args: { path: "/tmp/test.md" } });
+                if (capturedOnText) capturedOnText("Final response");
+                return Promise.resolve("Final response");
+            }),
+        });
+
+        const scheduler = new Scheduler({ dir: cronDir }, bridge);
+        const textEvents: any[] = [];
+        const toolEvents: any[] = [];
+        scheduler.on("text", (e: any) => textEvents.push(e));
+        scheduler.on("tool-start", (e: any) => toolEvents.push(e));
+        await scheduler.start();
+
+        await getLastScheduledCallback()!();
+
+        expect(textEvents).toHaveLength(2);
+        expect(textEvents[0].text).toBe("Here's the morning hello");
+        expect(textEvents[1].text).toBe("Final response");
+        expect(toolEvents).toHaveLength(1);
+        expect(toolEvents[0].info.toolName).toBe("write");
 
         scheduler.stop();
     });
@@ -802,7 +848,10 @@ Good morning!`);
 
             await getLastScheduledCallback()!();
 
-            expect(bridge.sendMessage).toHaveBeenCalledWith("[CRON:morning/greet] Good morning!");
+            expect(bridge.sendMessage).toHaveBeenCalledWith("[CRON:morning/greet] Good morning!", expect.objectContaining({
+                onText: expect.any(Function),
+                onToolStart: expect.any(Function),
+            }));
 
             scheduler.stop();
         });
@@ -986,7 +1035,10 @@ Do work stuff.`);
 
             await getLastScheduledCallback()!();
 
-            expect(workBridge.sendMessage).toHaveBeenCalledWith("[CRON:work-prompt] Do work stuff.");
+            expect(workBridge.sendMessage).toHaveBeenCalledWith("[CRON:work-prompt] Do work stuff.", expect.objectContaining({
+                onText: expect.any(Function),
+                onToolStart: expect.any(Function),
+            }));
             expect(mainBridge.sendMessage).not.toHaveBeenCalled();
 
             scheduler.stop();
