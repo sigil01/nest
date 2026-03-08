@@ -462,17 +462,28 @@ async function cmdAttach(args: ParsedArgs): Promise<void> {
         console.log(`Creating new session "${sessionName}" (based on "${defaultName}")`);
     }
 
-    // For Docker deployments, config paths are container-side.
-    // The `attach` section provides host-side overrides so the TUI
-    // can run locally while sharing session state with the container.
+    // For Docker deployments, config paths are container-side (e.g. /home/wren).
+    // attach.hostHome maps the container HOME to the host path so we can rewrite
+    // pi.cwd and agentDir for the local TUI process.
     const attachConfig = config.attach;
-    const agentDir = attachConfig?.agentDir ?? sessionConfig.pi.agentDir ?? config.instance?.agentDir;
-    const cwd = attachConfig?.cwd ?? sessionConfig.pi.cwd;
+    const hostHome = attachConfig?.hostHome;
 
-    // --continue resumes last conversation if one exists, starts fresh if none.
-    // --session-dir isolates conversations per nest session.
-    // Once in the TUI, use /new or /resume to manage conversations.
-    const agentDirResolved = agentDir ? resolve(agentDir) : undefined;
+    const rewrite = (containerPath: string): string => {
+        if (!hostHome) return containerPath;
+        // Find the container home by looking at pi.cwd (e.g. /home/wren)
+        const containerHome = sessionConfig.pi.cwd;
+        if (containerPath.startsWith(containerHome)) {
+            return hostHome + containerPath.slice(containerHome.length);
+        }
+        return containerPath;
+    };
+
+    const cwd = hostHome ?? sessionConfig.pi.cwd;
+    const agentDir = sessionConfig.pi.agentDir ?? config.instance?.agentDir;
+    const agentDirResolved = agentDir ? resolve(rewrite(agentDir)) : undefined;
+
+    // --session-dir matches what the kernel passes, so CLI and kernel
+    // share the same conversation directory for a given session name.
     const sessionDir = agentDirResolved
         ? join(agentDirResolved, "sessions", sessionName)
         : undefined;
@@ -485,15 +496,18 @@ async function cmdAttach(args: ParsedArgs): Promise<void> {
         piArgs.push("--session-dir", sessionDir);
     }
 
-    // Add extensions
+    // Add extensions (rewrite paths for host)
     if (sessionConfig.pi.extensions) {
         for (const ext of sessionConfig.pi.extensions) {
-            piArgs.push("-e", ext);
+            piArgs.push("-e", rewrite(ext));
         }
     }
 
     // Build env
     const env: Record<string, string | undefined> = { ...process.env };
+    if (hostHome) {
+        env.HOME = hostHome;
+    }
     if (attachConfig?.env) {
         Object.assign(env, attachConfig.env);
     }

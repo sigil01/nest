@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { join, resolve } from "node:path";
 import { Bridge } from "./bridge.js";
 import type { BridgeOptions } from "./bridge.js";
 import type { Config, SessionConfig, SessionState, Listener, MessageOrigin } from "./types.js";
@@ -28,11 +29,13 @@ export class SessionManager extends EventEmitter {
     private sessions = new Map<string, SessionInfo>();
     private defaultSession: string;
     private bridgeFactory: (opts: BridgeOptions) => Bridge;
+    private instanceAgentDir?: string;
 
     constructor(config: Config, bridgeFactory?: (opts: BridgeOptions) => Bridge) {
         super();
         this.bridgeFactory = bridgeFactory ?? ((opts) => new Bridge(opts));
         this.defaultSession = config.defaultSession;
+        this.instanceAgentDir = config.instance?.agentDir;
 
         for (const [name, sessionConfig] of Object.entries(config.sessions)) {
             this.sessions.set(name, {
@@ -89,12 +92,21 @@ export class SessionManager extends EventEmitter {
         info.state = "starting";
         logger.info("Starting session", { session: name });
 
+        // Explicit --session-dir so kernel and `nest attach` share the same
+        // conversation directory for a given session name.
+        const agentDir = info.config.pi.agentDir ?? this.instanceAgentDir;
+        const baseArgs = info.config.pi.args ?? ["--mode", "rpc", "--continue"];
+        const args = [...baseArgs];
+        if (agentDir && !args.some((a) => a === "--session-dir")) {
+            args.push("--session-dir", join(resolve(agentDir), "sessions", name));
+        }
+
         let bridge: Bridge;
         try {
             bridge = this.bridgeFactory({
                 cwd: info.config.pi.cwd,
                 command: info.config.pi.command,
-                args: info.config.pi.args,
+                args,
             });
             info.bridge = bridge;
             info.state = "running";

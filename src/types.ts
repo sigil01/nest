@@ -131,9 +131,11 @@ export interface TrackingConfig {
 // This type exists only so the kernel can detect sandbox mode.
 
 export interface AttachConfig {
-    cwd?: string;               // host-side cwd (overrides session pi.cwd for TUI)
-    agentDir?: string;          // host-side agent dir (overrides instance.agentDir for TUI)
-    env?: Record<string, string>; // extra env vars for the pi process (e.g. HOME)
+    /** Host-side path that maps to the container's HOME (e.g. /home/shared/wren/home).
+     *  Used to rewrite container paths (pi.cwd, agentDir) for `nest attach`. */
+    hostHome?: string;
+    /** Extra env vars for the pi process. */
+    env?: Record<string, string>;
 }
 
 export interface InstanceConfig {
