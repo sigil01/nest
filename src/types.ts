@@ -133,6 +133,7 @@ export interface TrackingConfig {
 export interface AttachConfig {
     cwd?: string;               // host-side cwd (overrides session pi.cwd for TUI)
     agentDir?: string;          // host-side agent dir (overrides instance.agentDir for TUI)
+    env?: Record<string, string>; // extra env vars for the pi process (e.g. HOME)
 }
 
 export interface InstanceConfig {

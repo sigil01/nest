@@ -494,6 +494,9 @@ async function cmdAttach(args: ParsedArgs): Promise<void> {
 
     // Build env
     const env: Record<string, string | undefined> = { ...process.env };
+    if (attachConfig?.env) {
+        Object.assign(env, attachConfig.env);
+    }
     if (agentDirResolved) {
         env.PI_CODING_AGENT_DIR = agentDirResolved;
     }
