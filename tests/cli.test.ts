@@ -115,6 +115,18 @@ describe("cli arg parsing", () => {
         expect(args.session).toBe("background");
     });
 
+    it("parses attach with -s new", () => {
+        const args = parseArgs(["node", "cli.js", "-w", "wren", "-s", "new", "attach"]);
+        expect(args.command).toBe("attach");
+        expect(args.session).toBe("new");
+    });
+
+    it("parses attach with -s resume", () => {
+        const args = parseArgs(["node", "cli.js", "-w", "wren", "-s", "resume", "attach"]);
+        expect(args.command).toBe("attach");
+        expect(args.session).toBe("resume");
+    });
+
     it("parses --workspace before command", () => {
         const args = parseArgs(["node", "cli.js", "-w", "wren", "start"]);
         expect(args.command).toBe("start");
