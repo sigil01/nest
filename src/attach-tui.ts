@@ -86,6 +86,7 @@ export function startTui(ws: WebSocket, workspaceName: string): void {
     editor.onSubmit = (text) => {
         if (!text.trim()) return;
         messages.push({ type: "user", text: text.trim() });
+        lastResponseIdx = -1; // next text event starts a new response
         if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: "message", text: text.trim() }));
         }
@@ -99,8 +100,11 @@ export function startTui(ws: WebSocket, workspaceName: string): void {
     let lastResponseIdx = -1;
 
     function addMessage(msg: ChatMessage): void {
+        // Non-response messages break the streaming sequence
+        if (msg.type !== "response") {
+            lastResponseIdx = -1;
+        }
         messages.push(msg);
-        lastResponseIdx = -1;
         rebuildMessages();
         tui.requestRender();
     }

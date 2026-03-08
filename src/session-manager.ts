@@ -241,10 +241,20 @@ export class SessionManager extends EventEmitter {
         const bindings = this.getListeners(sessionName);
         for (const { listener, origin } of bindings) {
             // Resolve wildcard channels: use the actual message origin
-            // when the binding uses "*" (meaning "all channels")
-            const resolvedOrigin = (origin.channel === "*" && replyOrigin && replyOrigin.platform === origin.platform)
-                ? replyOrigin
-                : origin;
+            // when the binding uses "*" (meaning "all channels").
+            // Skip the send entirely if wildcard can't be resolved
+            // (e.g. CLI message → Discord listener with channel "*").
+            let resolvedOrigin = origin;
+            if (origin.channel === "*") {
+                if (replyOrigin && replyOrigin.platform === origin.platform) {
+                    resolvedOrigin = replyOrigin;
+                } else if (replyOrigin) {
+                    // Different platform — can't resolve wildcard, skip
+                    continue;
+                }
+                // No replyOrigin (cron etc.) — handled by notifyOrigin, skip wildcard
+                else { continue; }
+            }
 
             try {
                 await listener.send(resolvedOrigin, text, files);
