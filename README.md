@@ -334,10 +334,29 @@ discord:
         "123456": "wren"
 ```
 
-## Running
+## Setup
 
 ```bash
 npm install
+npm run init    # interactive setup wizard
+```
+
+The wizard walks through:
+
+1. **Workspace** — working directory for pi
+2. **Model provider** — pick from Anthropic, OpenAI, Google, Bedrock, OpenRouter, Groq, xAI, Mistral, or custom OpenAI-compatible. Writes `~/.pi/agent/models.json`
+3. **Session** — name and pi extensions
+4. **Chat platforms** — Discord and/or Matrix with token + channel mapping
+5. **HTTP server** — port and auto-generated auth token
+6. **Cron** — scheduler directory
+
+Output: `config.yaml`, `~/.pi/agent/models.json`, seeded `plugins/` directory.
+
+Supports all pi backends: Anthropic, OpenAI, Google Gemini, Google Vertex AI, Amazon Bedrock, Azure OpenAI, OpenRouter, Groq, xAI, Mistral, and any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio).
+
+## Running
+
+```bash
 npm run dev              # tsx src/main.ts
 npm run dev config.yaml  # custom config path
 ```
@@ -355,8 +374,9 @@ The agent can write plugins too — that's the point.
 
 ```
 nest/
-├── src/                    # Kernel (~2,700 lines)
+├── src/                    # Kernel (~3,200 lines)
 │   ├── main.ts             # Entry point
+│   ├── init.ts             # Setup wizard (nest init)
 │   ├── kernel.ts           # Core orchestration
 │   ├── bridge.ts           # RPC pipe to pi
 │   ├── session-manager.ts  # Sessions (central hub)

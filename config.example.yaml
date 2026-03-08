@@ -1,7 +1,8 @@
-# ─── Nest Kernel Config ─────────────────────────────────────
+# ─── Nest Config ────────────────────────────────────────────
+# Run `npm run init` to generate this interactively.
 
 instance:
-    name: "wren"
+    name: "nest"
     dataDir: "."
     pluginsDir: "./plugins"
 
@@ -10,31 +11,26 @@ instance:
 # Cron jobs target them. Multiple listeners can watch the same session.
 
 sessions:
-    wren:
+    default:
         pi:
-            cwd: /home/wren
-            extensions:
-                - /app/extensions/attach.ts
+            cwd: /home/user
+            # extensions:
+            #     - /path/to/extension.ts
     # background:
     #     pi:
-    #         cwd: /home/wren
+    #         cwd: /home/user
     #     idleTimeoutMinutes: 30
 
-defaultSession: wren
+defaultSession: default
 
 # ─── Server ─────────────────────────────────────────────────
-# HTTP server for API, webhooks, and dashboard.
-# Plugins register their own routes.
 
 # server:
 #     port: 8484
-#     token: "env:SERVER_TOKEN"
+#     token: "nest_your-generated-token"
 #     host: "127.0.0.1"
-#     trustProxy: false
 
 # ─── Cron ───────────────────────────────────────────────────
-# Cron jobs in .md files. Each job targets a session.
-# No more "notify" — output goes to all listeners on that session.
 
 # cron:
 #     dir: ./cron.d
@@ -42,26 +38,22 @@ defaultSession: wren
 
 # ─── Usage Tracking ─────────────────────────────────────────
 
-# tracking:
-#     usageLog: ./usage.jsonl
-#     capacity: 1000
-#     retentionDays: 30
+tracking:
+    usageLog: ./usage.jsonl
+    capacity: 1000
+    retentionDays: 30
 
 # ─── Plugin Config ──────────────────────────────────────────
-# Plugins read their own sections from here.
-# The kernel doesn't validate these — plugins decide what they need.
+# Plugins read their own sections. The kernel doesn't validate these.
 
-discord:
-    token: "env:DISCORD_TOKEN"
-    channels:
-        "1234567890": "wren"    # channel ID -> session name
+# discord:
+#     token: "env:DISCORD_TOKEN"
+#     channels:
+#         "1234567890": "default"
 
 # matrix:
 #     homeserver: https://matrix.example.org
 #     user: "@bot:example.org"
 #     token: "env:MATRIX_TOKEN"
 #     channels:
-#         "!room:example.org": "wren"
-
-# dashboard:
-#     publicDir: ./public
+#         "!room:example.org": "default"
