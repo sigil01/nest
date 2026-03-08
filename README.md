@@ -98,59 +98,211 @@ sequenceDiagram
 
 ## Plugins
 
-A plugin is a `.ts` file (or directory with `index.ts`) in the plugins directory. It exports a default function receiving a `NestAPI` object:
+A plugin is a `.ts` file (or directory with `index.ts`) in the plugins directory. Each plugin exports a default function that receives a `NestAPI` object. Plugins are loaded alphabetically at boot via dynamic import. Reboot to pick up new plugins.
+
+### Loading
+
+The plugin loader scans `instance.pluginsDir` (default `./plugins`) at startup:
+
+- `plugins/foo.ts` — loaded directly
+- `plugins/bar/index.ts` — loaded as directory plugin (for plugins that need multiple files or static assets)
+
+Plugins are TypeScript files loaded via `tsx` — no compilation step needed. They share nest's `node_modules`.
+
+### What Plugins Can Do
+
+Plugins register capabilities through the `NestAPI` object:
+
+| Method | What it registers |
+|--------|-------------------|
+| `registerListener(listener)` | Platform adapter (Discord, Matrix, Telegram, IRC...) |
+| `registerMiddleware(middleware)` | Message interceptor — can transform, block, or log messages before they reach pi |
+| `registerCommand(name, command)` | Bot command (`bot!name args`) |
+| `registerRoute(method, path, handler)` | HTTP endpoint on the nest server |
+| `registerPrefixRoute(method, prefix, handler)` | Wildcard HTTP route (e.g. `/dashboard/*`) |
+| `on(event, handler)` | Lifecycle hook (message_in, message_out, session_start, session_stop, shutdown) |
+| `sessions.attach(session, listener, origin)` | Bind a listener to a session so it receives all output |
+
+### NestAPI Reference
 
 ```typescript
+interface NestAPI {
+    // --- Registration ---
+    registerListener(listener: Listener): void;
+    registerMiddleware(middleware: Middleware): void;
+    registerCommand(name: string, command: Command): void;
+    registerRoute(method: string, path: string, handler: RouteHandler): void;
+    registerPrefixRoute(method: string, prefix: string, handler: RouteHandler): void;
+    on(event: string, handler: (...args: any[]) => void): void;
+
+    // --- Sessions ---
+    sessions: {
+        get(name: string): Bridge | null;
+        getOrStart(name: string): Promise<Bridge>;
+        stop(name: string): Promise<void>;
+        list(): string[];
+        getDefault(): string;
+        recordActivity(name: string): void;
+        attach(sessionName: string, listener: Listener, origin: MessageOrigin): void;
+        detach(sessionName: string, listener: Listener): void;
+        getListeners(sessionName: string): Array<{ listener: Listener; origin: MessageOrigin }>;
+    };
+
+    // --- Usage Tracking ---
+    tracker: {
+        record(event: UsageData): UsageEvent;
+        today(): UsageSummary;
+        todayBySession(name: string): UsageSummary;
+        week(): { cost: number };
+        currentModel(): string;
+        currentContext(): number;
+    };
+
+    // --- Config, Logging, Instance ---
+    config: Config;          // Full config — plugins read their own sections
+    log: { info, warn, error };
+    instance: { name: string; dataDir: string };
+}
+```
+
+### Interfaces
+
+**Listener** — a platform adapter:
+
+```typescript
+interface Listener {
+    readonly name: string;
+    connect(): Promise<void>;
+    disconnect(): Promise<void>;
+    onMessage(handler: (msg: IncomingMessage) => void): void;
+    send(origin: MessageOrigin, text: string, files?: OutgoingFile[]): Promise<void>;
+    sendTyping?(origin: MessageOrigin): Promise<void>;
+}
+```
+
+**Middleware** — intercepts messages before they reach pi:
+
+```typescript
+interface Middleware {
+    readonly name: string;
+    // Return the message to continue, or null to block it.
+    process(msg: IncomingMessage): Promise<IncomingMessage | null>;
+}
+```
+
+**Command** — a bot command triggered by `bot!name`:
+
+```typescript
+interface Command {
+    interrupts?: boolean;  // Cancel pending pi work before executing?
+    execute(ctx: CommandContext): Promise<void>;
+}
+```
+
+### Plugin Config
+
+Plugins read their own sections from `config.yaml`. The kernel doesn't validate plugin config — it passes the full config object through and plugins grab what they need:
+
+```yaml
+# Kernel config (validated)
+sessions:
+    wren:
+        pi: { cwd: /home/wren }
+
+# Plugin config (passed through, not validated by kernel)
+discord:
+    token: "env:DISCORD_TOKEN"
+    channels:
+        "123456": "wren"
+
+my_custom_plugin:
+    whatever: "plugins decide their own schema"
+```
+
+### Example: Prompt Injection Guard
+
+```typescript
+// plugins/injection-guard.ts
 import type { NestAPI } from "../src/types.js";
 
 export default function(nest: NestAPI) {
+    const blocked = ["ignore previous instructions", "you are now", "disregard all"];
+
     nest.registerMiddleware({
-        name: "my-guard",
+        name: "injection-guard",
         async process(msg) {
-            // block, transform, or pass through
-            return msg;
+            const lower = msg.text.toLowerCase();
+            if (blocked.some(p => lower.includes(p))) {
+                nest.log.warn("Blocked suspicious message", { sender: msg.sender });
+                return null;  // block
+            }
+            return msg;  // pass through
         },
     });
 }
 ```
 
-### NestAPI
+### Example: Custom HTTP Endpoint
 
 ```typescript
-interface NestAPI {
-    // Register capabilities
-    registerListener(listener: Listener): void;
-    registerMiddleware(middleware: Middleware): void;
-    registerCommand(name: string, command: Command): void;
-    registerRoute(method: string, path: string, handler: RouteHandler): void;
+// plugins/api-hello.ts
+import type { NestAPI } from "../src/types.js";
 
-    // Sessions (attach/detach model)
-    sessions: {
-        get(name): Bridge | null;
-        getOrStart(name): Promise<Bridge>;
-        attach(session, listener, origin): void;
-        detach(session, listener): void;
-        getListeners(session): Array<{ listener, origin }>;
-        // ...
-    };
-
-    // Usage tracking, config, logging, instance info
-    tracker: { record(), today(), week(), ... };
-    config: Config;
-    log: { info(), warn(), error() };
-    instance: { name, dataDir };
+export default function(nest: NestAPI) {
+    nest.registerRoute("GET", "/api/hello", (_req, res) => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ hello: "world", instance: nest.instance.name }));
+    });
 }
 ```
 
+### Example: Listener Plugin
+
+```typescript
+// plugins/telegram.ts — hypothetical
+import type { NestAPI, Listener } from "../src/types.js";
+
+export default function(nest: NestAPI) {
+    const config = nest.config.telegram as { token: string; chatId: string } | undefined;
+    if (!config) return;
+
+    const listener: Listener = {
+        name: "telegram",
+        async connect() { /* ... */ },
+        async disconnect() { /* ... */ },
+        onMessage(handler) { /* ... */ },
+        async send(origin, text) { /* ... */ },
+    };
+
+    nest.registerListener(listener);
+    nest.sessions.attach(nest.sessions.getDefault(), listener, {
+        platform: "telegram",
+        channel: config.chatId,
+    });
+}
+```
+
+### Agent Self-Modification
+
+The agent (running inside pi) can write new plugins at runtime:
+
+1. User asks for a feature
+2. Agent writes a `.ts` file to the plugins directory
+3. Agent triggers `bot!reboot` (or hits `POST /api/reboot` via a pi extension)
+4. Nest restarts, scans plugins, loads the new file
+5. Feature is live
+
+The approval gate is the reboot, not the writing. The agent builds its own nervous system.
+
 ### Shipped Plugins
 
-| Plugin | What it does |
-|--------|-------------|
-| `discord.ts` | Discord listener with emoji resolution, attachments |
-| `matrix.ts` | Matrix listener |
-| `dashboard.ts` | API routes for status, sessions, usage, logs + static file serving |
-| `webhook.ts` | POST /api/webhook → send message to session |
-| `commands.ts` | Extended bot commands: model, think, compress, new, reload |
+| Plugin | Lines | What it does |
+|--------|-------|-------------|
+| `discord.ts` | 175 | Discord listener with emoji resolution, attachments, channel-to-session mapping |
+| `matrix.ts` | 101 | Matrix listener with room-to-session mapping |
+| `dashboard.ts` | 133 | API routes (status, sessions, usage, logs) + optional static file serving |
+| `webhook.ts` | 108 | `POST /api/webhook` — send a message to a session, get a response |
+| `commands.ts` | 91 | Extended bot commands: model, think, compress, new, reload |
 
 ## Config
 
