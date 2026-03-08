@@ -61,25 +61,27 @@ class CliListener implements Listener {
     }
 
     async send(origin: MessageOrigin, text: string, files?: OutgoingFile[], kind?: "text" | "tool" | "stream"): Promise<void> {
-        const client = this.activeClient;
-        if (!client || client.ws.readyState !== WebSocket.OPEN) return;
+        for (const client of this.clients.values()) {
+            if (!client.authenticated || client.ws.readyState !== WebSocket.OPEN) continue;
 
-        if (text) {
-            const type = kind === "tool" ? "tool_start" : kind === "stream" ? "stream" : "text";
-            this.wsSend(client.ws, { type, text });
-        }
-        if (files?.length) {
-            this.wsSend(client.ws, {
-                type: "files",
-                files: files.map((f) => ({ filename: f.filename, size: f.data.length })),
-            });
+            if (text) {
+                const type = kind === "tool" ? "tool_start" : kind === "stream" ? "stream" : "text";
+                this.wsSend(client.ws, { type, text });
+            }
+            if (files?.length) {
+                this.wsSend(client.ws, {
+                    type: "files",
+                    files: files.map((f) => ({ filename: f.filename, size: f.data.length })),
+                });
+            }
         }
     }
 
     async sendTyping(origin: MessageOrigin): Promise<void> {
-        const client = this.activeClient;
-        if (!client || client.ws.readyState !== WebSocket.OPEN) return;
-        this.wsSend(client.ws, { type: "typing" });
+        for (const client of this.clients.values()) {
+            if (!client.authenticated || client.ws.readyState !== WebSocket.OPEN) continue;
+            this.wsSend(client.ws, { type: "typing" });
+        }
     }
 
     notifyOrigin(): MessageOrigin | null {
