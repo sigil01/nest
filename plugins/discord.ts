@@ -129,7 +129,8 @@ class DiscordListener implements Listener {
                 if (block.kind === "__update" || block.kind === "__remove") continue;
                 if ((block.kind === "image" || block.kind === "file") && typeof block.data.ref === "string") {
                     try {
-                        const res = await fetch(`${this.nestUrl}${block.data.ref}`, {
+                        const url = `${this.nestUrl}${block.data.ref}`;
+                        const res = await fetch(url, {
                             headers: { "Authorization": `Bearer ${this.nestToken}` },
                         });
                         if (res.ok) {
@@ -137,7 +138,10 @@ class DiscordListener implements Listener {
                             const filename = (block.data.filename as string) ?? (block.kind === "image" ? "image.png" : "file");
                             blockFiles.push(new MessageAttachment(buf, filename));
                         }
-                    } catch {}
+                    } catch (err) {
+                        // Log fetch failures — likely auth or connectivity
+                        console.error(`[discord] block data fetch failed: ${err}`);
+                    }
                 }
                 // markdown, code, table — these render fine as text via fallback
                 // unknown blocks — fallback is already in text
@@ -254,7 +258,9 @@ export default function (nest: NestAPI): void {
     }
 
     const serverConfig = nest.config.server;
-    const nestUrl = serverConfig ? `http://${serverConfig.host ?? "127.0.0.1"}:${serverConfig.port}` : "http://127.0.0.1:8484";
+    // server.host may be 0.0.0.0 (bind all interfaces) — use 127.0.0.1 for local fetch
+    const host = serverConfig?.host === "0.0.0.0" ? "127.0.0.1" : (serverConfig?.host ?? "127.0.0.1");
+    const nestUrl = serverConfig ? `http://${host}:${serverConfig.port}` : "http://127.0.0.1:8484";
     const nestToken = serverConfig?.token ?? "";
 
     const listener = new DiscordListener(config.token, nestUrl, nestToken, config.notify, config.allowed_users);

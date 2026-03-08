@@ -270,7 +270,7 @@ class CliListener implements Listener {
     private async fetchBlockData(ref: string): Promise<string | null> {
         const server = this.nest.config.server;
         if (!server) return null;
-        const host = server.host ?? "127.0.0.1";
+        const host = server.host === "0.0.0.0" ? "127.0.0.1" : (server.host ?? "127.0.0.1");
         const url = `http://${host}:${server.port}${ref}`;
         try {
             const res = await fetch(url, {
