@@ -394,33 +394,65 @@ Each workspace has its own `.pi/agent/` directory for `models.json`, sessions, a
 Enable Docker sandboxing per workspace for filesystem isolation. Nix is available inside the container so the agent can install arbitrary dependencies declaratively.
 
 ```yaml
-# config.yaml
 instance:
     name: wren
     sandbox:
         enabled: true
-        image: "nest:latest"
 ```
 
 When `sandbox.enabled` is true, `nest start` transparently spawns a Docker container instead of running bare-metal:
 
-- Workspace dir bind-mounted at `/workspace` (config, plugins, cron, .pi/agent/)
-- Agent's working directory bind-mounted at its original path
-- `PI_CODING_AGENT_DIR` set to `/workspace/.pi/agent`
-- Host networking by default (override with `sandbox.network`)
-- Nix available — agent can `nix-env -iA nixpkgs.foo` for any dependency
+- **Workspace = HOME** — workspace dir mounted at `/home/nest`, `HOME=/home/nest`
+- **Pi isolation** — `PI_CODING_AGENT_DIR=/home/nest/.pi/agent`
+- **Nix available** — agent can `nix-env -iA nixpkgs.foo` for any dependency
+- **Host networking** by default
+- **no-new-privileges** enabled by default
+
+Full sandbox options:
 
 ```yaml
-# Full sandbox options
 instance:
     sandbox:
         enabled: true
         image: "nest:latest"
-        network: "host"
-        extraMounts:
+
+        # Filesystem
+        mounts:                          # extra bind mounts
             - "/data/shared:/shared:ro"
-        extraEnv:
+            - "/var/log:/logs"
+        readOnly: false                  # read-only root filesystem
+        tmpfs:                           # tmpfs mounts
+            - "/tmp:size=1g"
+
+        # Networking
+        network: "host"                  # host, none, bridge, or network name
+        dns:                             # custom DNS
+            - "1.1.1.1"
+        expose:                          # port forwarding (non-host networks)
+            - 8484
+
+        # User & permissions
+        user: "1000:1000"                # run as uid:gid
+        capDrop:                         # drop capabilities
+            - "ALL"
+        capAdd:                          # add back specific capabilities
+            - "NET_BIND_SERVICE"
+
+        # Resource limits
+        memory: "4g"
+        cpus: "2.0"
+        pidsLimit: 256
+
+        # Security
+        seccomp: "/path/to/profile.json"
+        apparmor: "nest-profile"
+        noNewPrivileges: true            # default: true
+
+        # Extra
+        env:
             SOME_VAR: "value"
+        args:                            # raw docker flags
+            - "--gpus=all"
 ```
 
 ### Attach

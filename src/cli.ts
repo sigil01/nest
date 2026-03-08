@@ -247,53 +247,126 @@ async function startSandboxed(
     const image = sandbox.image ?? "nest:latest";
     const containerName = `nest-${config.instance?.name ?? "default"}`;
 
-    // Resolve the agent cwd from the first session
-    const firstSession = Object.values(config.sessions)[0];
-    const agentCwd = firstSession?.pi.cwd ?? "/home";
-
     console.log(`Starting sandboxed workspace "${ws.name ?? ws.path}"`);
     console.log(`  Image:     ${image}`);
     console.log(`  Container: ${containerName}`);
     console.log(`  Workspace: ${ws.path}`);
     console.log();
 
-    // Build docker run args
     const dockerArgs = [
         "run", "--rm", "-it",
         "--name", containerName,
-        // Bind-mount the workspace directory
-        "-v", `${ws.path}:/workspace`,
-        // Bind-mount the agent's working directory
-        "-v", `${agentCwd}:${agentCwd}`,
-        // Set pi agent dir to the workspace's .pi/agent/
-        "-e", `PI_CODING_AGENT_DIR=/workspace/.pi/agent`,
-        // Network mode
+
+        // ── Workspace as HOME ──────────────────────────────
+        // The workspace IS the agent's home directory.
+        // Everything lives here: config, plugins, .pi/agent/, cron.d/
+        "-v", `${ws.path}:/home/nest`,
+        "-e", "HOME=/home/nest",
+        "-e", "PI_CODING_AGENT_DIR=/home/nest/.pi/agent",
+        "-w", "/home/nest",
+
+        // ── Networking ─────────────────────────────────────
         `--network=${sandbox.network ?? "host"}`,
     ];
 
-    // Extra mounts from config
-    if (sandbox.extraMounts) {
-        for (const mount of sandbox.extraMounts) {
+    // DNS
+    if (sandbox.dns) {
+        for (const server of sandbox.dns) {
+            dockerArgs.push("--dns", server);
+        }
+    }
+
+    // Port forwarding (only if not host networking)
+    if (sandbox.network && sandbox.network !== "host") {
+        // Expose configured ports
+        if (sandbox.expose) {
+            for (const port of sandbox.expose) {
+                dockerArgs.push("-p", `${port}:${port}`);
+            }
+        }
+        // Auto-expose server port
+        if (config.server) {
+            const port = config.server.port;
+            const host = config.server.host ?? "127.0.0.1";
+            dockerArgs.push("-p", `${host}:${port}:${port}`);
+        }
+    }
+
+    // ── Filesystem ─────────────────────────────────────────
+    if (sandbox.readOnly) {
+        dockerArgs.push("--read-only");
+    }
+
+    if (sandbox.tmpfs) {
+        for (const t of sandbox.tmpfs) {
+            dockerArgs.push("--tmpfs", t);
+        }
+    } else if (sandbox.readOnly) {
+        // Default tmpfs when read-only so nix/node can still work
+        dockerArgs.push("--tmpfs", "/tmp:size=1g");
+        dockerArgs.push("--tmpfs", "/run:size=64m");
+    }
+
+    // Extra bind mounts
+    if (sandbox.mounts) {
+        for (const mount of sandbox.mounts) {
             dockerArgs.push("-v", mount);
         }
     }
 
-    // Extra env vars from config
-    if (sandbox.extraEnv) {
-        for (const [key, val] of Object.entries(sandbox.extraEnv)) {
+    // ── User & Permissions ─────────────────────────────────
+    if (sandbox.user) {
+        dockerArgs.push("--user", sandbox.user);
+    }
+
+    // Capabilities: drop all by default, add back what's needed
+    if (sandbox.capDrop) {
+        for (const cap of sandbox.capDrop) {
+            dockerArgs.push("--cap-drop", cap);
+        }
+    }
+    if (sandbox.capAdd) {
+        for (const cap of sandbox.capAdd) {
+            dockerArgs.push("--cap-add", cap);
+        }
+    }
+
+    // ── Resource Limits ────────────────────────────────────
+    if (sandbox.memory) {
+        dockerArgs.push("--memory", sandbox.memory);
+    }
+    if (sandbox.cpus) {
+        dockerArgs.push("--cpus", sandbox.cpus);
+    }
+    if (sandbox.pidsLimit) {
+        dockerArgs.push("--pids-limit", String(sandbox.pidsLimit));
+    }
+
+    // ── Security ───────────────────────────────────────────
+    if (sandbox.noNewPrivileges !== false) {
+        dockerArgs.push("--security-opt", "no-new-privileges");
+    }
+    if (sandbox.seccomp) {
+        dockerArgs.push("--security-opt", `seccomp=${sandbox.seccomp}`);
+    }
+    if (sandbox.apparmor) {
+        dockerArgs.push("--security-opt", `apparmor=${sandbox.apparmor}`);
+    }
+
+    // ── Environment ────────────────────────────────────────
+    if (sandbox.env) {
+        for (const [key, val] of Object.entries(sandbox.env)) {
             dockerArgs.push("-e", `${key}=${val}`);
         }
     }
 
-    // Forward server port if configured
-    if (config.server && sandbox.network !== "host") {
-        const port = config.server.port;
-        const host = config.server.host ?? "127.0.0.1";
-        dockerArgs.push("-p", `${host}:${port}:${port}`);
+    // ── Raw args ───────────────────────────────────────────
+    if (sandbox.args) {
+        dockerArgs.push(...sandbox.args);
     }
 
-    // Image and command
-    dockerArgs.push(image, "node", "dist/cli.js", "start", "--config", "/workspace/config.yaml");
+    // ── Image & Command ────────────────────────────────────
+    dockerArgs.push(image, "node", "dist/cli.js", "start", "--config", "/home/nest/config.yaml");
 
     const docker = spawn("docker", dockerArgs, {
         stdio: "inherit",

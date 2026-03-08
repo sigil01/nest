@@ -7,13 +7,18 @@ instance:
     pluginsDir: "./plugins"
     agentDir: "./.pi/agent"    # pi config (models, sessions) — isolated from ~/.pi/agent/
     # sandbox:
-    #     enabled: true
-    #     image: "nest:latest"
-    #     network: "host"
-    #     extraMounts:
-    #         - "/data/shared:/shared:ro"
-    #     extraEnv:
-    #         SOME_VAR: "value"
+    #     enabled: true          # run in Docker container
+    #     image: "nest:latest"   # docker image
+    #     network: "host"        # host, none, bridge, or network name
+    #     mounts:                # extra bind mounts
+    #         - "/data:/data:ro"
+    #     readOnly: false        # read-only root filesystem
+    #     user: "1000:1000"      # uid:gid
+    #     memory: "4g"           # memory limit
+    #     cpus: "2.0"            # cpu limit
+    #     capDrop: ["ALL"]       # drop capabilities
+    #     capAdd: ["NET_BIND_SERVICE"]
+    #     noNewPrivileges: true  # default: true
 
 # ─── Sessions ───────────────────────────────────────────────
 
