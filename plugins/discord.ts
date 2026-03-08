@@ -8,7 +8,7 @@
  *       "channel_id": "session_name"
  */
 import { Client, Intents, MessageAttachment } from "discord.js";
-import type { NestAPI, Listener, IncomingMessage, MessageOrigin, Attachment, OutgoingFile } from "../src/types.js";
+import type { NestAPI, Listener, IncomingMessage, MessageOrigin, Attachment, OutgoingFile, Block } from "../src/types.js";
 import { splitMessage } from "../src/chunking.js";
 
 const MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024;
@@ -114,20 +114,97 @@ class DiscordListener implements Listener {
         return { platform: "discord", channel: this.notifyChannel };
     }
 
-    async send(origin: MessageOrigin, text: string, files?: OutgoingFile[]): Promise<void> {
+    async send(origin: MessageOrigin, text: string, files?: OutgoingFile[], kind?: "text" | "tool" | "stream", blocks?: Block[]): Promise<void> {
         const channel = await this.client.channels.fetch(origin.channel);
         if (!channel?.isText() || !("send" in channel)) return;
 
+        // Handle block protocol — send image blocks as attachments
+        const blockFiles: MessageAttachment[] = [];
+        if (blocks?.length) {
+            for (const block of blocks) {
+                if (block.kind === "__update" || block.kind === "__remove") continue;
+                if (block.kind === "image" && typeof block.data.base64 === "string") {
+                    const buf = Buffer.from(block.data.base64 as string, "base64");
+                    const filename = (block.data.filename as string) ?? "image.png";
+                    blockFiles.push(new MessageAttachment(buf, filename));
+                }
+                // markdown, code, table — these render fine as text via fallback
+                // unknown blocks — fallback is already in text
+            }
+        }
+
         const resolvedText = this.resolveEmotes(text);
         const chunks = splitMessage(resolvedText);
-        const discordFiles = files?.map((f) => new MessageAttachment(f.data, f.filename));
+        const discordFiles = [
+            ...(files?.map((f) => new MessageAttachment(f.data, f.filename)) ?? []),
+            ...blockFiles,
+        ];
 
         for (let i = 0; i < chunks.length; i++) {
             const payload: any = { content: chunks[i] };
-            if (i === 0 && discordFiles?.length) payload.files = discordFiles;
+            if (i === 0 && discordFiles.length > 0) payload.files = discordFiles;
             await (channel as any).send(payload);
             if (i < chunks.length - 1) await new Promise((r) => setTimeout(r, 250));
         }
+    }
+
+    async sendPrompt(origin: MessageOrigin, block: Block, timeoutMs: number): Promise<{ value: unknown } | { cancelled: true }> {
+        const channel = await this.client.channels.fetch(origin.channel);
+        if (!channel?.isText() || !("send" in channel)) {
+            return { cancelled: true };
+        }
+
+        if (block.kind === "confirm") {
+            const { MessageActionRow, MessageButton } = await import("discord.js");
+            const row = new MessageActionRow().addComponents(
+                new MessageButton().setCustomId("yes").setLabel("Yes").setStyle("SUCCESS"),
+                new MessageButton().setCustomId("no").setLabel("No").setStyle("DANGER"),
+            );
+            const msg = await (channel as any).send({
+                content: (block.data.text as string) ?? block.fallback,
+                components: [row],
+            });
+            try {
+                const interaction = await msg.awaitMessageComponent({ time: timeoutMs });
+                await interaction.update({ components: [] });
+                return { value: interaction.customId === "yes" };
+            } catch {
+                // Timeout — remove buttons
+                await msg.edit({ components: [] }).catch(() => {});
+                return { cancelled: true };
+            }
+        }
+
+        if (block.kind === "select" && Array.isArray(block.data.items)) {
+            const { MessageActionRow, MessageSelectMenu } = await import("discord.js");
+            const items = block.data.items as Array<{ value: string; label: string; description?: string }>;
+            const menu = new MessageSelectMenu()
+                .setCustomId("select")
+                .setPlaceholder((block.data.text as string) ?? "Choose...")
+                .addOptions(items.map((i) => ({
+                    value: i.value,
+                    label: i.label,
+                    description: i.description,
+                })));
+            const row = new MessageActionRow().addComponents(menu);
+            const msg = await (channel as any).send({
+                content: (block.data.text as string) ?? block.fallback,
+                components: [row],
+            });
+            try {
+                const interaction = await msg.awaitMessageComponent({ time: timeoutMs });
+                await interaction.update({ components: [] });
+                const values = (interaction as any).values;
+                return { value: Array.isArray(values) ? values[0] : values };
+            } catch {
+                await msg.edit({ components: [] }).catch(() => {});
+                return { cancelled: true };
+            }
+        }
+
+        // input and unknown — Discord can't do inline text input, send fallback
+        await (channel as any).send(block.fallback);
+        return { cancelled: true };
     }
 
     private resolveEmotes(text: string): string {
