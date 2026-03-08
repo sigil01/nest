@@ -309,9 +309,15 @@ export class SessionManager extends EventEmitter {
                 } else if (replyOrigin) {
                     // Different platform — can't resolve wildcard, skip
                     continue;
+                } else {
+                    // No replyOrigin (block protocol, cron, etc.) — fall back to notifyOrigin
+                    const notify = listener.notifyOrigin?.();
+                    if (notify) {
+                        resolvedOrigin = notify;
+                    } else {
+                        continue;
+                    }
                 }
-                // No replyOrigin (cron etc.) — handled by notifyOrigin, skip wildcard
-                else { continue; }
             }
 
             try {
