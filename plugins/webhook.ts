@@ -79,7 +79,7 @@ export default function (nest: NestAPI): void {
                     // Broadcast to all session listeners
                     const bindings = nest.sessions.getListeners(sessionName);
                     for (const { listener, origin } of bindings) {
-                        listener.send(origin, response).catch(() => {});
+                        listener.send(origin, response, undefined, "text").catch(() => {});
                     }
                 }).catch(() => {});
 
@@ -93,7 +93,7 @@ export default function (nest: NestAPI): void {
             // Broadcast to all session listeners
             const bindings = nest.sessions.getListeners(sessionName);
             for (const { listener, origin } of bindings) {
-                listener.send(origin, response).catch(() => {});
+                listener.send(origin, response, undefined, "text").catch(() => {});
             }
 
             res.writeHead(200, { "Content-Type": "application/json" });
