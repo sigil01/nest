@@ -34,7 +34,6 @@ class CliListener implements Listener {
     private wss: WebSocketServer;
     private clients = new Map<string, CliClient>();
     private activeClient: CliClient | null = null;  // most recent client
-    private clientCounter = 0;
     private messageHandler?: (msg: IncomingMessage) => void;
     private token: string;
     private nest: NestAPI;
@@ -91,7 +90,7 @@ class CliListener implements Listener {
     /** Called by the HTTP server upgrade handler */
     handleUpgrade(req: import("node:http").IncomingMessage, socket: import("node:stream").Duplex, head: Buffer): void {
         this.wss.handleUpgrade(req, socket, head, (ws) => {
-            const clientId = `cli-${++this.clientCounter}`;
+            const clientId = `cli-${this.nextClientId()}`;
             const client: CliClient = { ws, id: clientId, authenticated: false, username: "cli" };
             this.nest.log.info("CLI client connected", { clientId });
 
@@ -155,6 +154,12 @@ class CliListener implements Listener {
                 this.clients.delete(clientId);
             });
         });
+    }
+
+    private nextClientId(): number {
+        for (let i = 0; ; i++) {
+            if (!this.clients.has(`cli-${i}`)) return i;
+        }
     }
 
     private validateToken(provided: string): boolean {
