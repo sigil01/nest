@@ -1,0 +1,27 @@
+services:
+    nest:
+        build: .
+        restart: unless-stopped
+        user: "0:0"
+        cap_add:
+            - NET_ADMIN  # for iptables LAN blocking in entrypoint
+        ports:
+            - "8484:8484"
+        networks:
+            - isolated
+        volumes:
+            - ./config.yaml:/config/config.yaml:ro
+            - ./plugins:/app/plugins      # Live plugin directory
+            - ./home:/home/wren           # Persistent home
+            - nix-store:/nix              # Persistent Nix store (optional)
+        environment:
+            - HOME=/home/wren
+        env_file:
+            - .env
+
+networks:
+    isolated:
+        driver: bridge
+
+volumes:
+    nix-store:

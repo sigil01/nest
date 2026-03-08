@@ -1,0 +1,15 @@
+[Unit]
+Description=nest daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node %h/nest/dist/main.js %h/nest/config.yaml
+WorkingDirectory=%h/nest
+Restart=on-failure
+RestartSec=5
+Environment=NODE_ENV=production
+EnvironmentFile=-%h/.config/nest/env
+
+[Install]
+WantedBy=default.target
