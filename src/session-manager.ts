@@ -220,11 +220,22 @@ export class SessionManager extends EventEmitter {
     /**
      * Broadcast a message to all listeners attached to a session.
      */
-    async broadcast(sessionName: string, text: string, files?: import("./types.js").OutgoingFile[]): Promise<void> {
+    async broadcast(
+        sessionName: string,
+        text: string,
+        files?: import("./types.js").OutgoingFile[],
+        replyOrigin?: import("./types.js").MessageOrigin,
+    ): Promise<void> {
         const bindings = this.getListeners(sessionName);
         for (const { listener, origin } of bindings) {
+            // Resolve wildcard channels: use the actual message origin
+            // when the binding uses "*" (meaning "all channels")
+            const resolvedOrigin = (origin.channel === "*" && replyOrigin && replyOrigin.platform === origin.platform)
+                ? replyOrigin
+                : origin;
+
             try {
-                await listener.send(origin, text, files);
+                await listener.send(resolvedOrigin, text, files);
             } catch (err) {
                 logger.error("Broadcast send failed", {
                     session: sessionName,

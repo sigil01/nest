@@ -386,9 +386,8 @@ export class Kernel {
             const response = await bridge.sendMessage(promptText, {
                 images: images.length > 0 ? images : undefined,
                 onToolStart: (info) => {
-                    // Broadcast tool call to all listeners on this session
                     const summary = formatToolCall(info);
-                    this.sessionManager.broadcast(sessionName, summary).catch(() => {});
+                    this.sessionManager.broadcast(sessionName, summary, undefined, origin).catch(() => {});
                 },
                 onToolEnd: (info: ToolEndInfo) => {
                     if (info.toolName === "attach" && !info.isError && info.result?.details) {
@@ -399,8 +398,7 @@ export class Kernel {
                     }
                 },
                 onText: (text) => {
-                    // Broadcast intermediate text to all listeners on this session
-                    this.sessionManager.broadcast(sessionName, text).catch(() => {});
+                    this.sessionManager.broadcast(sessionName, text, undefined, origin).catch(() => {});
                 },
             });
 
@@ -410,7 +408,7 @@ export class Kernel {
 
             // Broadcast final response to all attached listeners
             this.events.emit("message_out", origin, response);
-            await this.sessionManager.broadcast(sessionName, response, pendingFiles.length > 0 ? pendingFiles : undefined);
+            await this.sessionManager.broadcast(sessionName, response, pendingFiles.length > 0 ? pendingFiles : undefined, origin);
         } catch (err) {
             logger.error("Failed to process message", { error: String(err), session: sessionName });
         } finally {
