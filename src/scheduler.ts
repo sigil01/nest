@@ -6,7 +6,7 @@ import cron from "node-cron";
 import { parseJobFile } from "./job.js";
 import type { Bridge } from "./bridge.js";
 import type { SessionManager } from "./session-manager.js";
-import type { CronConfig, JobDefinition, Step } from "./types.js";
+import type { CronConfig, JobDefinition, Step, ToolCallInfo } from "./types.js";
 import * as logger from "./logger.js";
 
 interface ActiveJob {
@@ -32,11 +32,6 @@ export class Scheduler extends EventEmitter {
         this.getUserInteractionTime = getUserInteractionTime;
     }
 
-    /**
-     * Set a SessionManager for resolving per-job session bridges.
-     * When set, jobs with a `session` field will use the named session's bridge.
-     * Jobs without a `session` field use the default session.
-     */
     setSessionManager(sm: SessionManager): void {
         this.sessionManager = sm;
     }
@@ -49,20 +44,11 @@ export class Scheduler extends EventEmitter {
 
     async stop(): Promise<void> {
         this.stopWatcher();
-        for (const [name, active] of this.jobs) {
-            active.task.stop();
-            logger.info("Stopped cron job", { name });
-        }
+        for (const [, active] of this.jobs) active.task.stop();
         this.jobs.clear();
-        for (const timer of this.debounceTimers.values()) {
-            clearTimeout(timer);
-        }
+        for (const timer of this.debounceTimers.values()) clearTimeout(timer);
         this.debounceTimers.clear();
-
-        // Wait for any in-flight job execution to finish
-        if (this.activeExecution) {
-            await this.activeExecution;
-        }
+        if (this.activeExecution) await this.activeExecution;
     }
 
     getJobs(): Map<string, ActiveJob> {
@@ -73,13 +59,11 @@ export class Scheduler extends EventEmitter {
         let entries: string[];
         try {
             entries = await readdir(this.config.dir, { recursive: true });
-        } catch (err) {
-            logger.error("Failed to read cron directory", { dir: this.config.dir, error: String(err) });
+        } catch {
             return;
         }
 
-        const mdFiles = entries.filter((f) => f.endsWith(".md"));
-        for (const file of mdFiles) {
+        for (const file of entries.filter((f) => f.endsWith(".md"))) {
             await this.loadJob(join(this.config.dir, file));
         }
     }
@@ -87,52 +71,31 @@ export class Scheduler extends EventEmitter {
     private async loadJob(filePath: string): Promise<void> {
         try {
             const definition = await parseJobFile(filePath, this.config.dir);
-
-            // Remove existing job with same name if reloading
             const existing = this.jobs.get(definition.name);
-            if (existing) {
-                existing.task.stop();
-                logger.info("Reloading cron job", { name: definition.name });
-            }
+            if (existing) existing.task.stop();
 
             if (!definition.enabled) {
-                logger.info("Skipping disabled cron job", { name: definition.name });
                 if (existing) this.jobs.delete(definition.name);
                 return;
             }
 
             const task = cron.schedule(definition.schedule, async () => {
-                try {
-                    await this.executeJob(definition);
-                } catch (err) {
-                    logger.error("Job execution failed", { name: definition.name, error: String(err) });
+                try { await this.executeJob(definition); } catch (err) {
+                    logger.error("Job failed", { name: definition.name, error: String(err) });
                 }
             });
 
             this.jobs.set(definition.name, { definition, task });
             logger.info("Loaded cron job", { name: definition.name, schedule: definition.schedule });
         } catch (err) {
-            logger.error("Failed to load job file", { file: filePath, error: String(err) });
+            logger.error("Failed to load job", { file: filePath, error: String(err) });
         }
     }
 
-    private removeJob(name: string): void {
-        const existing = this.jobs.get(name);
-        if (existing) {
-            existing.task.stop();
-            this.jobs.delete(name);
-            logger.info("Removed cron job", { name });
-        }
-    }
-
-    /**
-     * Resolve the Bridge for a given job.
-     * Uses SessionManager if available, falling back to the direct bridge.
-     */
     private resolveJobBridge(job: JobDefinition): Bridge | Promise<Bridge> {
         if (this.sessionManager) {
-            const sessionName = job.session ?? this.sessionManager.getDefaultSessionName();
-            return this.sessionManager.getOrStartSession(sessionName);
+            const session = job.session ?? this.sessionManager.getDefaultSessionName();
+            return this.sessionManager.getOrStartSession(session);
         }
         return this.bridge;
     }
@@ -141,53 +104,27 @@ export class Scheduler extends EventEmitter {
         if (this.getUserInteractionTime) {
             const elapsed = Date.now() - this.getUserInteractionTime();
             const grace = job.gracePeriodMs ?? this.config.gracePeriodMs ?? 5000;
-            if (grace > 0 && elapsed < grace) {
-                logger.info("Skipping cron job, user interaction grace period", {
-                    name: job.name,
-                    elapsedMs: elapsed,
-                    gracePeriodMs: grace,
-                });
-                return;
-            }
+            if (grace > 0 && elapsed < grace) return;
         }
 
-        // Lock mutex BEFORE any async work to prevent race condition
-        if (this.executing) {
-            logger.info("Skipping cron job, busy", { name: job.name });
-            return;
-        }
+        if (this.executing) return;
         this.executing = true;
 
         try {
-            // Resolve the bridge for this job's session.
             let bridge: Bridge;
             try {
                 const result = this.resolveJobBridge(job);
                 bridge = result instanceof Promise ? await result : result;
             } catch (err) {
-                logger.error("Failed to resolve session for cron job", {
-                    name: job.name,
-                    session: job.session,
-                    error: String(err),
-                });
-                this.emit("job-error", { job: job.name, session: job.session, error: String(err) });
+                logger.error("Failed to resolve session for cron", { name: job.name, error: String(err) });
                 return;
             }
 
-            if (bridge.busy) {
-                logger.info("Skipping cron job, bridge busy", { name: job.name });
-                return;
-            }
+            if (bridge.busy) return;
 
-            const sessionName = job.session ?? this.sessionManager?.getDefaultSessionName() ?? "main";
-            this.emit("job-start", { job: job.name, session: sessionName });
             const execution = this.runSteps(job, bridge);
             this.activeExecution = execution;
-            try {
-                await execution;
-            } finally {
-                this.emit("job-end", { job: job.name, session: sessionName });
-            }
+            await execution;
         } finally {
             this.executing = false;
             this.activeExecution = null;
@@ -201,36 +138,25 @@ export class Scheduler extends EventEmitter {
             try {
                 await this.executeStep(step, job, bridge);
             } catch (err) {
-                const message = String(err instanceof Error ? err.message : err);
-                if (message.includes("Interrupted") || message.includes("Cancelled")) {
-                    logger.info("Cron job interrupted by user", { name: job.name, step: step.type });
+                const msg = String(err instanceof Error ? err.message : err);
+                if (msg.includes("Interrupted") || msg.includes("Cancelled")) {
                     this.emit("aborted", { job });
                     return;
                 }
-                logger.error("Step failed, aborting job", {
-                    name: job.name,
-                    step: step.type,
-                    error: message,
-                });
+                logger.error("Step failed", { name: job.name, step: step.type, error: msg });
                 return;
             }
         }
-
-        logger.info("Cron job complete", { name: job.name });
     }
 
     private async executeStep(step: Step, job: JobDefinition, bridge: Bridge): Promise<void> {
         switch (step.type) {
             case "new-session":
                 await bridge.command("new_session");
-                logger.info("Step: new-session", { job: job.name });
                 break;
-
             case "compact":
                 await bridge.command("compact");
-                logger.info("Step: compact", { job: job.name });
                 break;
-
             case "model": {
                 const result = await bridge.command("get_available_models");
                 const models: any[] = result?.models ?? [];
@@ -241,80 +167,61 @@ export class Scheduler extends EventEmitter {
                         m.name.toLowerCase().includes(query) ||
                         `${m.provider}/${m.id}`.toLowerCase().includes(query),
                 );
-                if (!match) {
-                    throw new Error(`No model matching '${step.model}'`);
-                }
+                if (!match) throw new Error(`No model matching '${step.model}'`);
                 await bridge.command("set_model", { provider: match.provider, modelId: match.id });
-                logger.info("Step: model", { job: job.name, model: `${match.provider}/${match.id}` });
                 break;
             }
-
             case "prompt": {
                 const message = `[CRON:${job.name}] ${job.body}`;
                 const response = await bridge.sendMessage(message, {
                     onText: (text) => {
-                        if (text.trim()) {
-                            this.emit("text", { job, text });
-                        }
+                        if (text.trim()) this.emit("text", { job, text });
                     },
-                    onToolStart: (info) => {
+                    onToolStart: (info: ToolCallInfo) => {
                         this.emit("tool-start", { job, info });
                     },
                 });
-                if (response && response.trim()) {
+                if (response?.trim()) {
                     this.emit("response", { job, response });
                 }
-                logger.info("Step: prompt", { job: job.name, responseLength: response?.length ?? 0 });
                 break;
             }
-
             case "reload":
                 await bridge.command("prompt", { message: "/reload-runtime" });
-                logger.info("Step: reload", { job: job.name });
                 break;
         }
     }
 
-    // --- Hot reload ---
+    // ─── Hot Reload ──────────────────────────────────────────
 
     private startWatcher(): void {
         try {
-            this.watcher = watch(this.config.dir, { recursive: true }, (eventType, filename) => {
-                if (!filename || !filename.endsWith(".md")) return;
+            this.watcher = watch(this.config.dir, { recursive: true }, (_type, filename) => {
+                if (!filename?.endsWith(".md")) return;
                 this.debouncedReload(filename);
             });
-            logger.info("Watching cron directory", { dir: this.config.dir });
-        } catch (err) {
-            logger.error("Failed to start directory watcher", { dir: this.config.dir, error: String(err) });
-        }
+        } catch {}
     }
 
     private stopWatcher(): void {
-        if (this.watcher) {
-            this.watcher.close();
-            this.watcher = null;
-        }
+        this.watcher?.close();
+        this.watcher = null;
     }
 
     private debouncedReload(filename: string): void {
         const existing = this.debounceTimers.get(filename);
         if (existing) clearTimeout(existing);
-
-        this.debounceTimers.set(
-            filename,
-            setTimeout(async () => {
-                this.debounceTimers.delete(filename);
-                const filePath = join(this.config.dir, filename);
-                const name = filename.replace(/\.md$/, "").replace(/\\/g, "/");
-
-                // Check if file still exists (might have been deleted)
-                try {
-                    await stat(filePath);
-                    await this.loadJob(filePath);
-                } catch {
-                    this.removeJob(name);
-                }
-            }, 300),
-        );
+        this.debounceTimers.set(filename, setTimeout(async () => {
+            this.debounceTimers.delete(filename);
+            const filePath = join(this.config.dir, filename);
+            const name = filename.replace(/\.md$/, "").replace(/\\/g, "/");
+            try {
+                await stat(filePath);
+                await this.loadJob(filePath);
+            } catch {
+                const existing = this.jobs.get(name);
+                if (existing) { existing.task.stop(); this.jobs.delete(name); }
+            }
+        }, 300));
     }
 }

@@ -1,7 +1,0 @@
-id: hello-world
-name: Hello World
-version: 1
-slots:
-    - type: dashboard
-      entry: panel.js
-      defaultHeight: 80

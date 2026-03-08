@@ -1,9 +1,0 @@
-{{DOMAIN}} {
-    reverse_proxy nest:8484
-    header {
-        Strict-Transport-Security "max-age=31536000; includeSubDomains"
-        X-Frame-Options "DENY"
-        X-Content-Type-Options "nosniff"
-        -Server
-    }
-}

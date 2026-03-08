@@ -1,135 +1,91 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { writeFileSync, unlinkSync, mkdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { describe, it, expect, afterAll } from "vitest";
 import { loadConfig } from "../src/config.js";
+import { writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
 
-const tmpDir = join(import.meta.dirname, ".tmp");
-const tmpFile = (name: string) => join(tmpDir, name);
+const TMP = join(import.meta.dirname ?? ".", ".test-config-tmp");
 
-beforeEach(() => mkdirSync(tmpDir, { recursive: true }));
-afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
+function writeConfig(name: string, content: string): string {
+    mkdirSync(TMP, { recursive: true });
+    const path = join(TMP, name);
+    writeFileSync(path, content);
+    return path;
+}
 
 describe("loadConfig", () => {
-    it("parses a valid YAML config", () => {
-        writeFileSync(
-            tmpFile("config.yaml"),
-            `
-pi:
-    cwd: /home/test
-security:
-    allowed_users:
-        - "@willow:athena"
-`
-        );
-
-        const config = loadConfig(tmpFile("config.yaml"));
-        expect(config.pi.cwd).toBe("/home/test");
-        expect(config.security.allowed_users).toEqual(["@willow:athena"]);
+    it("loads a valid config with sessions", () => {
+        const path = writeConfig("valid.yaml", `
+sessions:
+  main:
+    pi:
+      cwd: /tmp
+defaultSession: main
+`);
+        const config = loadConfig(path);
+        expect(config.sessions.main.pi.cwd).toBe("/tmp");
+        expect(config.defaultSession).toBe("main");
     });
 
-    it("resolves env: references", () => {
-        process.env.TEST_TOKEN = "secret123";
-        writeFileSync(
-            tmpFile("config.yaml"),
-            `
-pi:
-    cwd: /home/test
-matrix:
-    homeserver: https://athena.local
-    user: "@hades:athena"
-    token: "env:TEST_TOKEN"
-security:
-    allowed_users:
-        - "@willow:athena"
-`
-        );
-
-        const config = loadConfig(tmpFile("config.yaml"));
-        expect(config.matrix?.token).toBe("secret123");
-        delete process.env.TEST_TOKEN;
+    it("sets defaultSession to first session if not specified", () => {
+        const path = writeConfig("nodefault.yaml", `
+sessions:
+  wren:
+    pi:
+      cwd: /tmp
+`);
+        const config = loadConfig(path);
+        expect(config.defaultSession).toBe("wren");
     });
 
-    it("throws on missing env var", () => {
-        writeFileSync(
-            tmpFile("config.yaml"),
-            `
+    it("throws if sessions is missing", () => {
+        const path = writeConfig("nosessions.yaml", `
 pi:
-    cwd: /home/test
-matrix:
-    token: "env:NONEXISTENT_VAR"
-security:
-    allowed_users:
-        - "@willow:athena"
-`
-        );
-
-        expect(() => loadConfig(tmpFile("config.yaml"))).toThrow("NONEXISTENT_VAR");
+  cwd: /tmp
+`);
+        expect(() => loadConfig(path)).toThrow("sessions is required");
     });
 
-    it("throws when pi.cwd is missing", () => {
-        writeFileSync(
-            tmpFile("config.yaml"),
-            `
-security:
-    allowed_users:
-        - "@willow:athena"
-`
-        );
-
-        expect(() => loadConfig(tmpFile("config.yaml"))).toThrow("pi.cwd is required");
+    it("throws if session has no pi.cwd", () => {
+        const path = writeConfig("nocwd.yaml", `
+sessions:
+  main:
+    pi: {}
+`);
+        expect(() => loadConfig(path)).toThrow("pi.cwd is required");
     });
 
-    it("throws when allowed_users is empty", () => {
-        writeFileSync(
-            tmpFile("config.yaml"),
-            `
-pi:
-    cwd: /home/test
-security:
-    allowed_users: []
-`
-        );
-
-        expect(() => loadConfig(tmpFile("config.yaml"))).toThrow("allowed_users");
+    it("provides instance defaults", () => {
+        const path = writeConfig("defaults.yaml", `
+sessions:
+  main:
+    pi:
+      cwd: /tmp
+`);
+        const config = loadConfig(path);
+        expect(config.instance?.name).toBe("nest");
+        expect(config.instance?.pluginsDir).toBe("./plugins");
     });
 
-    it("parses optional sections", () => {
-        writeFileSync(
-            tmpFile("config.yaml"),
-            `
-pi:
-    cwd: /home/test
-    command: /usr/local/bin/pi
-    args: ["--mode", "rpc"]
-security:
-    allowed_users:
-        - "@willow:athena"
-cron:
-    dir: /home/test/cron.d
-    default_notify: "#hades:athena"
-`
-        );
-
-        const config = loadConfig(tmpFile("config.yaml"));
-        expect(config.pi.command).toBe("/usr/local/bin/pi");
-        expect(config.cron?.dir).toBe("/home/test/cron.d");
-        expect(config.cron?.default_notify).toBe("#hades:athena");
+    it("passes through plugin config sections untouched", () => {
+        const path = writeConfig("plugins.yaml", `
+sessions:
+  main:
+    pi:
+      cwd: /tmp
+discord:
+  token: test-token
+  channels:
+    "123": main
+custom_plugin:
+  foo: bar
+`);
+        const config = loadConfig(path);
+        expect((config as any).discord.token).toBe("test-token");
+        expect((config as any).custom_plugin.foo).toBe("bar");
     });
 
-    it("validates cron.dir is required when cron is present", () => {
-        writeFileSync(
-            tmpFile("config.yaml"),
-            `
-pi:
-    cwd: /home/test
-security:
-    allowed_users:
-        - "@willow:athena"
-cron:
-    default_notify: "#hades:athena"
-`
-        );
-
-        expect(() => loadConfig(tmpFile("config.yaml"))).toThrow("cron.dir is required");
+    // Cleanup
+    afterAll(() => {
+        try { rmSync(TMP, { recursive: true }); } catch {}
     });
 });

@@ -1,3 +1,5 @@
+// ─── Core Message Types ───────────────────────────────────────
+
 export interface Attachment {
     url: string;
     filename: string;
@@ -25,6 +27,8 @@ export interface MessageOrigin {
     channel: string;
 }
 
+// ─── Listener Interface ──────────────────────────────────────
+
 export interface Listener {
     readonly name: string;
     connect(): Promise<void>;
@@ -33,6 +37,35 @@ export interface Listener {
     send(origin: MessageOrigin, text: string, files?: OutgoingFile[]): Promise<void>;
     sendTyping?(origin: MessageOrigin): Promise<void>;
 }
+
+// ─── Middleware Interface ────────────────────────────────────
+
+export interface Middleware {
+    readonly name: string;
+    process(msg: IncomingMessage): Promise<IncomingMessage | null>;
+}
+
+// ─── Command Interface ──────────────────────────────────────
+
+export interface Command {
+    interrupts?: boolean;
+    execute(ctx: CommandContext): Promise<void>;
+}
+
+export interface CommandContext {
+    args: string;
+    bridge: Bridge;
+    reply: (text: string) => Promise<void>;
+    sessionName: string;
+    nest: NestAPI;
+}
+
+// ─── Route Handler ──────────────────────────────────────────
+
+import type { IncomingMessage as HttpReq, ServerResponse } from "node:http";
+export type RouteHandler = (req: HttpReq, res: ServerResponse) => void | Promise<void>;
+
+// ─── Bridge Events ──────────────────────────────────────────
 
 export interface ToolCallInfo {
     toolName: string;
@@ -49,20 +82,11 @@ export interface ToolEndInfo {
     isError: boolean;
 }
 
-export interface CorsConfig {
-    origin: string;
-}
+// ─── Forward declarations (avoid circular imports) ──────────
 
-export interface ServerConfig {
-    port: number;
-    token: string;
-    publicDir?: string;
-    cors?: CorsConfig;
-    trustProxy?: boolean;
-    host?: string;
-}
+import type { Bridge } from "./bridge.js";
 
-// ─── Session & Routing Types ──────────────────────────────────
+// ─── Session Types ──────────────────────────────────────────
 
 export type SessionState = "idle" | "starting" | "running" | "stopping";
 
@@ -76,88 +100,18 @@ export interface SessionConfig {
     idleTimeoutMinutes?: number;
 }
 
-export interface RoutingRule {
-    match: {
-        platform?: string;
-        channel?: string;
-    };
-    session: string;
-}
+// ─── Config ─────────────────────────────────────────────────
 
-export interface RoutingConfig {
-    rules: RoutingRule[];
-    default: string;
-}
-
-// ─── Files Types ──────────────────────────────────────────────
-
-export interface FilesConfig {
-    roots: Record<string, string>;
-}
-
-export interface FileEntry {
-    name: string;
-    path: string;
-    type: "file" | "dir";
-    children?: FileEntry[];
-}
-
-// ─── Extensions Types ─────────────────────────────────────────
-
-export interface ExtensionsConfig {
-    dir: string;
-}
-
-export interface ExtensionSlotConfig {
-    type: 'dashboard' | 'sidebar' | 'toolbar' | 'viewer';
-    entry: string;
-    defaultHeight?: number;
-}
-
-export interface ExtensionManifest {
-    id: string;
-    name: string;
-    version: number;
-    slots: ExtensionSlotConfig[];
-    // Backward compat with old manifests (entry + optional styles, no slots)
-    entry?: string;
-    styles?: string;
-}
-
-// ─── Main Config ──────────────────────────────────────────────
-
-export interface Config {
-    pi: {
-        cwd: string;
-        command?: string;
-        args?: string[];
-        extensions?: string[];
-    };
-    security: {
-        allowed_users: string[];
-    };
-    matrix?: {
-        homeserver: string;
-        user: string;
-        token: string;
-        storage_path?: string;
-    };
-    discord?: {
-        token: string;
-    };
-    cron?: CronConfig;
-    server?: ServerConfig;
-    tracking?: TrackingConfig;
-    files?: FilesConfig;
-    extensions?: ExtensionsConfig;
-    sessions?: Record<string, SessionConfig>;
-    defaultSession?: string;
-    routing?: RoutingConfig;
+export interface ServerConfig {
+    port: number;
+    token: string;
+    host?: string;
+    trustProxy?: boolean;
+    cors?: { origin: string };
 }
 
 export interface CronConfig {
     dir: string;
-    default_notify?: string;
     gracePeriodMs?: number;
 }
 
@@ -166,6 +120,26 @@ export interface TrackingConfig {
     capacity?: number;
     retentionDays?: number;
 }
+
+export interface InstanceConfig {
+    name: string;
+    dataDir?: string;
+    pluginsDir?: string;
+}
+
+export interface Config {
+    instance?: InstanceConfig;
+    sessions: Record<string, SessionConfig>;
+    defaultSession: string;
+    server?: ServerConfig;
+    cron?: CronConfig;
+    tracking?: TrackingConfig;
+    // Plugins read their own sections from here.
+    // The kernel doesn't validate plugin config.
+    [key: string]: unknown;
+}
+
+// ─── Usage Types ────────────────────────────────────────────
 
 export interface UsageEvent {
     timestamp: number;
@@ -180,32 +154,16 @@ export interface UsageEvent {
     sessionName?: string;
 }
 
-// ─── Webhook Types ────────────────────────────────────────────
-
-export interface WebhookRequest {
-    message: string;
-    notify?: string;
-    source?: string;
-    session?: string;  // reserved for P8
+export interface UsageSummary {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    cost: number;
+    messageCount: number;
 }
 
-export interface WebhookResult {
-    ok: boolean;
-    response?: string;
-    queued?: boolean;
-    error?: string;
-}
-
-/** Callback for handling inbound webhooks. Avoids circular server↔daemon imports. */
-export type WebhookHandler = (req: WebhookRequest) => Promise<WebhookResult>;
-
-export interface ActivityEntry {
-    sender: string;
-    platform: string;
-    channel: string;
-    timestamp: number;
-    responseTimeMs: number;
-}
+// ─── Cron Job Types ─────────────────────────────────────────
 
 export type Step =
     | { type: "new-session" }
@@ -219,38 +177,89 @@ export interface JobDefinition {
     file: string;
     schedule: string;
     steps: Step[];
-    notify: string | "none" | null;  // null = inherit default
     enabled: boolean;
-    gracePeriodMs?: number;  // per-job override; undefined = use global default
-    session?: string;  // target session name; undefined = use default session
+    gracePeriodMs?: number;
+    session?: string;
     body: string;
 }
 
-// ─── Config Reload Types ──────────────────────────────────────
+// ─── Activity ───────────────────────────────────────────────
 
-/** Describes a single config field that changed */
-export interface ConfigChange {
-    section: string;
-    key: string;
-    oldValue: unknown;
-    newValue: unknown;
-    hotReloadable: boolean;
+export interface ActivityEntry {
+    sender: string;
+    platform: string;
+    channel: string;
+    timestamp: number;
+    responseTimeMs: number;
 }
 
-/** Result of diffing two configs */
-export interface ConfigDiff {
-    changes: ConfigChange[];
-    hasRestartRequired: boolean;
-    hasHotReloadable: boolean;
+// ─── NestAPI — The Plugin Interface ─────────────────────────
+
+export interface NestAPI {
+    // Registration
+    registerListener(listener: Listener): void;
+    registerMiddleware(middleware: Middleware): void;
+    registerCommand(name: string, command: Command): void;
+    registerRoute(method: string, path: string, handler: RouteHandler): void;
+    registerPrefixRoute(method: string, prefix: string, handler: RouteHandler): void;
+
+    // Lifecycle events
+    on(event: "message_in", handler: (msg: IncomingMessage) => void): void;
+    on(event: "message_out", handler: (origin: MessageOrigin, text: string) => void): void;
+    on(event: "session_start", handler: (name: string) => void): void;
+    on(event: "session_stop", handler: (name: string) => void): void;
+    on(event: "shutdown", handler: () => void): void;
+    on(event: string, handler: (...args: any[]) => void): void;
+
+    // Sessions
+    sessions: {
+        get(name: string): Bridge | null;
+        getOrStart(name: string): Promise<Bridge>;
+        stop(name: string): Promise<void>;
+        list(): string[];
+        getDefault(): string;
+        recordActivity(name: string): void;
+        attach(sessionName: string, listener: Listener, origin: MessageOrigin): void;
+        detach(sessionName: string, listener: Listener): void;
+        getListeners(sessionName: string): Array<{ listener: Listener; origin: MessageOrigin }>;
+    };
+
+    // Usage tracking
+    tracker: {
+        record(event: {
+            model: string;
+            inputTokens: number;
+            outputTokens: number;
+            cacheReadTokens: number;
+            cacheWriteTokens: number;
+            contextSize: number;
+            cost: number;
+            sessionName?: string;
+        }): UsageEvent;
+        today(): UsageSummary;
+        todayBySession(name: string): UsageSummary;
+        week(): { cost: number };
+        currentModel(): string;
+        currentContext(): number;
+    };
+
+    // Config — plugins grab their own sections
+    config: Config;
+
+    // Logging
+    log: {
+        info(message: string, data?: Record<string, unknown>): void;
+        warn(message: string, data?: Record<string, unknown>): void;
+        error(message: string, data?: Record<string, unknown>): void;
+    };
+
+    // Instance
+    instance: {
+        name: string;
+        dataDir: string;
+    };
 }
 
-/** Config with sensitive fields redacted */
-export type ConfigRedacted = {
-    [K in keyof Config]: K extends "discord"
-        ? { token: string } | undefined
-        : K extends "matrix"
-          ? { homeserver: string; user: string; token: string; storage_path?: string } | undefined
-          : K extends "server"
-            ? { port: number; token: string; publicDir?: string; cors?: CorsConfig; trustProxy?: boolean; host?: string } | undefined
-            : Config[K];
-};
+// ─── Plugin Definition ──────────────────────────────────────
+
+export type NestPlugin = (nest: NestAPI) => void | Promise<void>;

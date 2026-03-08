@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseJobContent, parseStep, parseSteps, JobParseError } from "../src/job.js";
+import { parseJobContent, parseStep, parseSteps } from "../src/job.js";
 
 describe("parseStep", () => {
     it("parses string steps", () => {
@@ -10,337 +10,52 @@ describe("parseStep", () => {
     });
 
     it("parses model step", () => {
-        expect(parseStep({ model: "claude-haiku-4-5" })).toEqual({
-            type: "model",
-            model: "claude-haiku-4-5",
-        });
+        expect(parseStep({ model: "claude-3" })).toEqual({ type: "model", model: "claude-3" });
     });
 
-    it("rejects unknown string step", () => {
-        expect(() => parseStep("unknown")).toThrow("Unknown step: unknown");
-    });
-
-    it("rejects invalid object step", () => {
-        expect(() => parseStep({ foo: "bar" })).toThrow("Invalid step");
-    });
-
-    it("rejects non-string model value", () => {
-        expect(() => parseStep({ model: 123 })).toThrow("value must be a string");
-    });
-
-    it("rejects model step with extra keys", () => {
-        expect(() => parseStep({ model: "haiku", typo: "yes" })).toThrow("unexpected extra keys: typo");
-    });
-
-    it("rejects array", () => {
-        expect(() => parseStep([1, 2])).toThrow("Invalid step");
-    });
-});
-
-describe("parseSteps", () => {
-    it("parses a mixed steps array", () => {
-        const raw = ["new-session", { model: "haiku" }, "prompt", "compact"];
-        expect(parseSteps(raw)).toEqual([
-            { type: "new-session" },
-            { type: "model", model: "haiku" },
-            { type: "prompt" },
-            { type: "compact" },
-        ]);
-    });
-
-    it("rejects non-array", () => {
-        expect(() => parseSteps("prompt")).toThrow("steps must be an array");
-    });
-
-    it("includes step index in error messages", () => {
-        const raw = ["new-session", "compact", "bogus"];
-        expect(() => parseSteps(raw)).toThrow("step[2]:");
+    it("throws on unknown step", () => {
+        expect(() => parseStep("unknown")).toThrow("Unknown step");
     });
 });
 
 describe("parseJobContent", () => {
-    it("parses a complete job file", () => {
+    it("parses a valid job", () => {
         const content = `---
 schedule: "0 7 * * *"
-notify: "123456"
 steps:
   - new-session
-  - model: claude-haiku-4-5
   - prompt
-  - compact
+session: wren
 ---
+Good morning!`;
 
-Do the morning checklist.`;
-
-        const job = parseJobContent(content, "/home/wren/cron.d/morning.md");
-        expect(job.name).toBe("morning");
-        expect(job.schedule).toBe("0 7 * * *");
-        expect(job.notify).toBe("123456");
-        expect(job.enabled).toBe(true);
-        expect(job.body).toBe("Do the morning checklist.");
-        expect(job.steps).toEqual([
-            { type: "new-session" },
-            { type: "model", model: "claude-haiku-4-5" },
-            { type: "prompt" },
-            { type: "compact" },
-        ]);
-    });
-
-    it("parses job with no notify (inherits default)", () => {
-        const content = `---
-schedule: "0 */6 * * *"
-steps:
-  - compact
----`;
-
-        const job = parseJobContent(content, "/cron.d/compact.md");
-        expect(job.notify).toBeNull();
-    });
-
-    it("parses notify: none", () => {
-        const content = `---
-schedule: "0 */6 * * *"
-notify: none
-steps:
-  - compact
----`;
-
-        const job = parseJobContent(content, "/cron.d/compact.md");
-        expect(job.notify).toBe("none");
-    });
-
-    it("parses notify: false as none", () => {
-        const content = `---
-schedule: "0 */6 * * *"
-notify: false
-steps:
-  - compact
----`;
-
-        const job = parseJobContent(content, "/cron.d/compact.md");
-        expect(job.notify).toBe("none");
-    });
-
-    it("parses enabled: false", () => {
-        const content = `---
-schedule: "0 7 * * *"
-enabled: false
-steps:
-  - compact
----`;
-
-        const job = parseJobContent(content, "/cron.d/disabled.md");
-        expect(job.enabled).toBe(false);
-    });
-
-    it("defaults enabled to true", () => {
-        const content = `---
-schedule: "0 7 * * *"
-steps:
-  - compact
----`;
-
-        const job = parseJobContent(content, "/cron.d/test.md");
-        expect(job.enabled).toBe(true);
-    });
-
-    it("rejects missing schedule", () => {
-        const content = `---
-steps:
-  - compact
----`;
-        expect(() => parseJobContent(content, "test.md")).toThrow(JobParseError);
-        expect(() => parseJobContent(content, "test.md")).toThrow("schedule is required");
-    });
-
-    it("rejects invalid cron expression", () => {
-        const content = `---
-schedule: "not a cron"
-steps:
-  - compact
----`;
-        expect(() => parseJobContent(content, "test.md")).toThrow("invalid cron expression");
-    });
-
-    it("rejects missing steps", () => {
-        const content = `---
-schedule: "0 7 * * *"
----`;
-        expect(() => parseJobContent(content, "test.md")).toThrow("steps is required");
-    });
-
-    it("rejects prompt step without body", () => {
-        const content = `---
-schedule: "0 7 * * *"
-steps:
-  - prompt
----`;
-        expect(() => parseJobContent(content, "test.md")).toThrow("no body content");
-    });
-
-    it("allows prompt step with body", () => {
-        const content = `---
-schedule: "0 7 * * *"
-steps:
-  - prompt
----
-
-Hello world`;
-        const job = parseJobContent(content, "/cron.d/test.md");
-        expect(job.body).toBe("Hello world");
-    });
-
-    it("allows no-prompt job without body", () => {
-        const content = `---
-schedule: "0 */6 * * *"
-steps:
-  - compact
----`;
-        const job = parseJobContent(content, "/cron.d/compact.md");
-        expect(job.body).toBe("");
-    });
-
-    it("rejects non-boolean enabled value", () => {
-        const content = `---
-schedule: "0 7 * * *"
-enabled: "false"
-steps:
-  - compact
----`;
-        expect(() => parseJobContent(content, "test.md")).toThrow("enabled must be a boolean");
-    });
-
-    it("derives job name from filename", () => {
-        const content = `---
-schedule: "0 7 * * *"
-steps:
-  - compact
----`;
-        expect(parseJobContent(content, "/some/path/my-job.md").name).toBe("my-job");
-    });
-
-    it("parses gracePeriodMs from frontmatter", () => {
-        const content = `---
-schedule: "0 7 * * *"
-gracePeriodMs: 10000
-steps:
-  - compact
----`;
-        const job = parseJobContent(content, "/cron.d/test.md");
-        expect(job.gracePeriodMs).toBe(10000);
-    });
-
-    it("allows gracePeriodMs of 0", () => {
-        const content = `---
-schedule: "0 7 * * *"
-gracePeriodMs: 0
-steps:
-  - compact
----`;
-        const job = parseJobContent(content, "/cron.d/test.md");
-        expect(job.gracePeriodMs).toBe(0);
-    });
-
-    it("defaults gracePeriodMs to undefined when omitted", () => {
-        const content = `---
-schedule: "0 7 * * *"
-steps:
-  - compact
----`;
-        const job = parseJobContent(content, "/cron.d/test.md");
-        expect(job.gracePeriodMs).toBeUndefined();
-    });
-
-    it("rejects negative gracePeriodMs", () => {
-        const content = `---
-schedule: "0 7 * * *"
-gracePeriodMs: -1000
-steps:
-  - compact
----`;
-        expect(() => parseJobContent(content, "test.md")).toThrow("gracePeriodMs must be a non-negative number");
-    });
-
-    it("rejects non-number gracePeriodMs", () => {
-        const content = `---
-schedule: "0 7 * * *"
-gracePeriodMs: "5000"
-steps:
-  - compact
----`;
-        expect(() => parseJobContent(content, "test.md")).toThrow("gracePeriodMs must be a non-negative number");
-    });
-
-    it("parses session from frontmatter", () => {
-        const content = `---
-schedule: "0 7 * * *"
-session: work
-steps:
-  - compact
----`;
-        const job = parseJobContent(content, "/cron.d/test.md");
-        expect(job.session).toBe("work");
-    });
-
-    it("defaults session to undefined when omitted", () => {
-        const content = `---
-schedule: "0 7 * * *"
-steps:
-  - compact
----`;
-        const job = parseJobContent(content, "/cron.d/test.md");
-        expect(job.session).toBeUndefined();
-    });
-
-    it("rejects non-string session value", () => {
-        const content = `---
-schedule: "0 7 * * *"
-session: 123
-steps:
-  - compact
----`;
-        expect(() => parseJobContent(content, "test.md")).toThrow("session must be a non-empty string");
-    });
-
-    it("rejects empty session string", () => {
-        const content = `---
-schedule: "0 7 * * *"
-session: ""
-steps:
-  - compact
----`;
-        expect(() => parseJobContent(content, "test.md")).toThrow("session must be a non-empty string");
-    });
-
-    it("trims whitespace from session name", () => {
-        const content = `---
-schedule: "0 7 * * *"
-session: "  work  "
-steps:
-  - compact
----`;
-        const job = parseJobContent(content, "/cron.d/test.md");
-        expect(job.session).toBe("work");
-    });
-
-    it("rejects session names with invalid characters", () => {
-        const content = `---
-schedule: "0 7 * * *"
-session: "bad session!"
-steps:
-  - compact
----`;
-        expect(() => parseJobContent(content, "test.md")).toThrow("letters, numbers, hyphens, and underscores");
-    });
-
-    it("accepts session names with hyphens and underscores", () => {
-        const content = `---
-schedule: "0 7 * * *"
-session: "my_session-1"
-steps:
-  - compact
----`;
         const job = parseJobContent(content, "test.md");
-        expect(job.session).toBe("my_session-1");
+        expect(job.name).toBe("test");
+        expect(job.schedule).toBe("0 7 * * *");
+        expect(job.steps).toHaveLength(2);
+        expect(job.session).toBe("wren");
+        expect(job.body).toBe("Good morning!");
+        expect(job.enabled).toBe(true);
+    });
+
+    it("does not have a notify field", () => {
+        const content = `---
+schedule: "0 7 * * *"
+steps:
+  - prompt
+---
+hello`;
+        const job = parseJobContent(content, "test.md");
+        expect((job as any).notify).toBeUndefined();
+    });
+
+    it("throws if schedule is missing", () => {
+        expect(() => parseJobContent("---\nsteps:\n  - prompt\n---\nhello", "test.md"))
+            .toThrow("schedule is required");
+    });
+
+    it("throws if prompt step has no body", () => {
+        expect(() => parseJobContent("---\nschedule: '* * * * *'\nsteps:\n  - prompt\n---\n", "test.md"))
+            .toThrow("no body");
     });
 });

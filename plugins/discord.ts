@@ -1,24 +1,30 @@
+/**
+ * Discord listener plugin for nest.
+ *
+ * Config section (in config.yaml):
+ *   discord:
+ *     token: "env:DISCORD_TOKEN"
+ *     channels:
+ *       "channel_id": "session_name"
+ */
 import { Client, Intents, MessageAttachment } from "discord.js";
-import type { Listener, IncomingMessage, MessageOrigin, Attachment, OutgoingFile } from "../types.js";
-import * as logger from "../logger.js";
-import { splitMessage } from "../chunking.js";
+import type { NestAPI, Listener, IncomingMessage, MessageOrigin, Attachment, OutgoingFile } from "../src/types.js";
+import { splitMessage } from "../src/chunking.js";
 
-const MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024; // 25MB
+const MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024;
 
 async function downloadAttachment(url: string, maxSize: number): Promise<Buffer | null> {
     try {
         const res = await fetch(url);
         if (!res.ok) return null;
         const buf = Buffer.from(await res.arrayBuffer());
-        if (buf.length > maxSize) return null;
-        return buf;
-    } catch (err) {
-        logger.error("Failed to download attachment", { url, error: String(err) });
+        return buf.length > maxSize ? null : buf;
+    } catch {
         return null;
     }
 }
 
-export class DiscordListener implements Listener {
+class DiscordListener implements Listener {
     readonly name = "discord";
     private client: Client;
     private token: string;
@@ -40,26 +46,11 @@ export class DiscordListener implements Listener {
 
     async connect(): Promise<void> {
         this.client.on("messageCreate", async (message) => {
-            if (!this.messageHandler) return;
-            if (message.author.bot) return;
+            if (!this.messageHandler || message.author.bot) return;
 
-            logger.info("Discord message received", {
-                sender: message.author.username,
-                channel: message.channelId,
-                attachments: message.attachments.size,
-            });
-
-            // Download and classify attachments
             const attachments: Attachment[] = [];
             for (const [, att] of message.attachments) {
-                if (att.size > MAX_ATTACHMENT_SIZE) {
-                    logger.warn("Skipping oversized attachment", {
-                        name: att.name,
-                        size: att.size,
-                    });
-                    continue;
-                }
-
+                if (att.size > MAX_ATTACHMENT_SIZE) continue;
                 const contentType = att.contentType ?? "application/octet-stream";
                 const data = await downloadAttachment(att.url, MAX_ATTACHMENT_SIZE);
                 if (!data) continue;
@@ -71,40 +62,27 @@ export class DiscordListener implements Listener {
                     size: data.length,
                     data,
                 };
-
                 if (contentType.startsWith("image/")) {
                     attachment.base64 = data.toString("base64");
                 }
-
                 attachments.push(attachment);
             }
 
-            const msg: IncomingMessage = {
+            this.messageHandler({
                 platform: "discord",
                 channel: message.channelId,
                 sender: message.author.username,
                 text: message.content,
                 attachments: attachments.length > 0 ? attachments : undefined,
-            };
-
-            this.messageHandler(msg);
+            });
         });
 
         this.client.on("emojiCreate", () => this.buildEmojiCache());
         this.client.on("emojiDelete", () => this.buildEmojiCache());
         this.client.on("emojiUpdate", () => this.buildEmojiCache());
 
-        this.client.on("error", (err) => {
-            logger.error("Discord client error", { error: String(err) });
-        });
-
-        // Wait for ready, not just login
         await new Promise<void>((resolve, reject) => {
-            this.client.once("ready", (c) => {
-                logger.info("Discord connected", {
-                    user: c.user.tag,
-                    guilds: c.guilds.cache.map((g: any) => g.name),
-                });
+            this.client.once("ready", () => {
                 this.buildEmojiCache();
                 resolve();
             });
@@ -132,31 +110,21 @@ export class DiscordListener implements Listener {
 
         const resolvedText = this.resolveEmotes(text);
         const chunks = splitMessage(resolvedText);
-
-        const discordFiles = files?.map(
-            (f) => new MessageAttachment(f.data, f.filename),
-        );
+        const discordFiles = files?.map((f) => new MessageAttachment(f.data, f.filename));
 
         for (let i = 0; i < chunks.length; i++) {
             const payload: any = { content: chunks[i] };
-            // Attach files to the first chunk only
-            if (i === 0 && discordFiles && discordFiles.length > 0) {
-                payload.files = discordFiles;
-            }
+            if (i === 0 && discordFiles?.length) payload.files = discordFiles;
             await (channel as any).send(payload);
-            // Small delay between chunks to avoid rate limiting
-            if (i < chunks.length - 1) {
-                await new Promise((r) => setTimeout(r, 250));
-            }
+            if (i < chunks.length - 1) await new Promise((r) => setTimeout(r, 250));
         }
     }
 
-    /** Replace :emote_name: with Discord emoji format using guild cache */
     private resolveEmotes(text: string): string {
         if (this.emojiCache.size === 0) return text;
         return text.replace(/:([a-zA-Z0-9_]+):/g, (match, name: string) => {
             const emoji = this.emojiCache.get(name);
-            if (!emoji) return match; // not a guild emoji, leave as-is
+            if (!emoji) return match;
             return emoji.animated ? `<a:${name}:${emoji.id}>` : `<:${name}:${emoji.id}>`;
         });
     }
@@ -166,13 +134,42 @@ export class DiscordListener implements Listener {
         for (const [, guild] of this.client.guilds.cache) {
             for (const [, emoji] of guild.emojis.cache) {
                 if (emoji.name) {
-                    this.emojiCache.set(emoji.name, {
-                        id: emoji.id,
-                        animated: emoji.animated ?? false,
-                    });
+                    this.emojiCache.set(emoji.name, { id: emoji.id, animated: emoji.animated ?? false });
                 }
             }
         }
-        logger.info("Emoji cache built", { count: this.emojiCache.size });
     }
+}
+
+// ─── Plugin Entry Point ──────────────────────────────────────
+
+export default function (nest: NestAPI): void {
+    const config = nest.config.discord as { token: string; channels?: Record<string, string> } | undefined;
+    if (!config?.token) {
+        nest.log.info("Discord plugin: no token configured, skipping");
+        return;
+    }
+
+    const listener = new DiscordListener(config.token);
+    nest.registerListener(listener);
+
+    // Attach channels to sessions
+    if (config.channels) {
+        for (const [channelId, sessionName] of Object.entries(config.channels)) {
+            nest.sessions.attach(sessionName, listener, {
+                platform: "discord",
+                channel: channelId,
+            });
+        }
+    } else {
+        // Default: attach to default session (all channels go there)
+        nest.sessions.attach(nest.sessions.getDefault(), listener, {
+            platform: "discord",
+            channel: "*",
+        });
+    }
+
+    nest.log.info("Discord plugin loaded", {
+        channels: config.channels ? Object.keys(config.channels).length : "all->default",
+    });
 }

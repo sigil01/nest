@@ -1,8 +1,8 @@
 {
     "name": "nest",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "private": true,
-    "description": "A thin daemon that bridges Matrix (and other platforms) to a single pi instance via RPC",
+    "description": "Minimal agent gateway kernel — sessions, plugins, cron, HTTP",
     "type": "module",
     "license": "MIT",
     "engines": {
@@ -12,13 +12,10 @@
         "build": "tsc",
         "dev": "tsx src/main.ts",
         "start": "node dist/main.js",
-        "tui": "tsx src/tui/main.ts",
-        "build:workspace": "cd workspace && npm run build",
         "test": "vitest run",
         "test:watch": "vitest"
     },
     "dependencies": {
-        "@mariozechner/pi-tui": "^0.55.1",
         "discord.js": "^13.17.1",
         "gray-matter": "^4.0.3",
         "js-yaml": "^4.1.1",

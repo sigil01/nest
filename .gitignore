@@ -1,10 +1,4 @@
 node_modules/
 dist/
-public/
 .env
 config.yaml
-matrix-bot.json
-/scratchpad
-Dockerfile
-docker-compose.yml
-scripts/entrypoint.sh

@@ -1,50 +1,67 @@
-pi:
-    cwd: /pi-cwd
-    # extensions baked into the Docker image:
-    extensions:
-        - /app/extensions/attach.ts
+# ─── Nest Kernel Config ─────────────────────────────────────
 
-# Uncomment the platform(s) you want:
+instance:
+    name: "wren"
+    dataDir: "."
+    pluginsDir: "./plugins"
 
-# matrix:
-#     homeserver: https://athena.local
-#     user: "@hades:athena"
-#     token: "env:MATRIX_TOKEN"
-#     storage_path: /data/matrix-bot.json
+# ─── Sessions ───────────────────────────────────────────────
+# Sessions are independent pi processes. Listeners attach to them.
+# Cron jobs target them. Multiple listeners can watch the same session.
+
+sessions:
+    wren:
+        pi:
+            cwd: /home/wren
+            extensions:
+                - /app/extensions/attach.ts
+    # background:
+    #     pi:
+    #         cwd: /home/wren
+    #     idleTimeoutMinutes: 30
+
+defaultSession: wren
+
+# ─── Server ─────────────────────────────────────────────────
+# HTTP server for API, webhooks, and dashboard.
+# Plugins register their own routes.
+
+# server:
+#     port: 8484
+#     token: "env:SERVER_TOKEN"
+#     host: "127.0.0.1"
+#     trustProxy: false
+
+# ─── Cron ───────────────────────────────────────────────────
+# Cron jobs in .md files. Each job targets a session.
+# No more "notify" — output goes to all listeners on that session.
+
+# cron:
+#     dir: ./cron.d
+#     gracePeriodMs: 5000
+
+# ─── Usage Tracking ─────────────────────────────────────────
+
+# tracking:
+#     usageLog: ./usage.jsonl
+#     capacity: 1000
+#     retentionDays: 30
+
+# ─── Plugin Config ──────────────────────────────────────────
+# Plugins read their own sections from here.
+# The kernel doesn't validate these — plugins decide what they need.
 
 discord:
     token: "env:DISCORD_TOKEN"
+    channels:
+        "1234567890": "wren"    # channel ID -> session name
 
-security:
-    allowed_users:
-        - "willowsparks"    # Discord username
+# matrix:
+#     homeserver: https://matrix.example.org
+#     user: "@bot:example.org"
+#     token: "env:MATRIX_TOKEN"
+#     channels:
+#         "!room:example.org": "wren"
 
-# cron:
-#     dir: /pi-cwd/cron.d
-#     default_notify: "#hades:athena"    # or Discord channel ID
-#     gracePeriodMs: 5000               # skip jobs if user message within last N ms (default: 5000)
-
-# server:
-#     # Security headers always applied to every response:
-#     #   Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src blob: data:
-#     #   X-Frame-Options: DENY
-#     #   X-Content-Type-Options: nosniff
-#     #   Referrer-Policy: strict-origin-when-cross-origin
-#     #   Permissions-Policy: camera=(), microphone=(), geolocation=()
-#     # Note: HSTS should be set by your reverse proxy (Caddy/nginx), not here.
-#     port: 8484
-#     token: "env:SERVER_TOKEN"         # Required — Bearer token for API auth
-#     publicDir: /app/public            # Optional — defaults to ./public
-#     host: "127.0.0.1"                 # Bind address — use "0.0.0.0" for Docker
-#     trustProxy: false                 # Set true behind a reverse proxy (nginx, Caddy)
-
-# files:
-#     roots:
-#         vault: /path/to/vault        # Named file roots for the workspace browser
-#         sketches: /path/to/sketches  # Add as many as you like
-#         cron: /path/to/cron.d
-
-# extensions:
-#     dir: /path/to/extensions     # Directory containing extension subdirectories
-                                    # Each subdirectory needs a manifest.yaml with slots config
-                                    # Extensions run in sandboxed iframes (see docs/extensions.md)
+# dashboard:
+#     publicDir: ./public
