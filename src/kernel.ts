@@ -696,9 +696,9 @@ export class Kernel {
                 notifySend(job, response);
             });
 
-            this.scheduler.on("text", ({ job, text }: { job: JobDefinition; text: string }) => {
-                notifySend(job, text);
-            });
+            // Cron streaming text — don't send to notify targets.
+            // Only the final response matters. Sending deltas spams Discord.
+            this.scheduler.on("text", () => {});
 
             this.scheduler.on("aborted", ({ job }: { job: JobDefinition }) => {
                 notifySend(job, `⏹️ Cron job \`${job.name}\` aborted.`);
